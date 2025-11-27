@@ -414,6 +414,13 @@ class SortformerDiarizationOnline:
         with self.segment_lock:
             self.speaker_segments.clear()
         
+        # Clean up tensors
+        self.streaming_state = None
+        self.total_preds = None
+        self._previous_chunk_features = None
+        self.buffer_audio = np.array([], dtype=np.float32)
+        self.audio_buffer = []
+        
         if self.debug:
             concatenated_audio = np.concatenate(self.audio_buffer)
             audio_data_int16 = (concatenated_audio * 32767).astype(np.int16)                

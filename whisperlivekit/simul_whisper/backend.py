@@ -156,7 +156,13 @@ class SimulStreamingOnlineProcessor:
         """Explicitly clean up resources."""
         if self.model is not None:
             self.model.remove_hooks()
+            self.asr.release_model(self.model.model)
             self.model = None
+            
+        # Force GC collection to ensure tensors are freed
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def __del__(self):
         # free the model and add a new model to stack.
@@ -382,21 +388,25 @@ class SimulStreamingASR():
         """
         pass
 
+    def release_model(self, model_instance):
+        """Return a model instance to the pool."""
+        with self.lock:
+            if len(self.models) < self.preload_model_count:
+                self.models.append(model_instance)
+                logger.info("Returned model to pool.")
+            else:
+                # If pool is full, we could optionally discard the model
+                # or expand the pool if needed. For now, discard to save memory.
+                logger.info("Pool full, discarding returned model.")
+                # Explicitly delete to help GC
+                del model_instance
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
     def replenish_pool(self):
+        # Deprecated or used for initial fill. 
+        # Now we rely on release_model to keep the pool populated.
         with self.lock:
             if len(self.models) >= self.preload_model_count:
                 return
-        
-        # If we need to load a model, we do it under lock to prevent double loading issues if multiple threads try to replenish or load
-        # Although this serializes loading, it prevents potential race conditions in underlying C/C++ libraries that might cause double frees
-        # when loading models concurrently.
-        try:
-            with self.lock:
-                # Check again under lock
-                if len(self.models) >= self.preload_model_count:
-                    return
-                logger.info(f"Replenishing model pool (current: {len(self.models)})...")
-                self.models.append(self.load_model())
-                logger.info(f"Model pool replenished (current: {len(self.models)}).")
-        except Exception as e:
-            logger.error(f"Failed to replenish model pool: {e}")
