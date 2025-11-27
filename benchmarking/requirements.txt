@@ -1,0 +1,5 @@
+websockets
+jiwer
+tqdm
+numpy
+
