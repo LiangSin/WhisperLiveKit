@@ -43,12 +43,13 @@ pip install -r requirements.txt
 Use `run_benchmark.py` to perform the ASR testing.
 
 ```bash
-python3 run_benchmark.py --dataset_path /path/to/LibriSpeech/dev-clean
+python3 run_benchmark.py --dataset_path /path/to/LibriSpeech/dev-clean --dataset_class LibriSpeechDataset
 ```
 
 #### Arguments
 
 -   `--dataset_path`: Path to the root of the LibriSpeech dataset (e.g., `/work/b11902009/LibriSpeech/LibriSpeech/dev-clean`). **Required**.
+-   `--dataset_class`: Name of the dataset class in `dataset.py` (e.g. `LibriSpeechDataset`). **Required**.
 -   `--url`: WebSocket URL of the WhisperLiveKit server. Default: `ws://localhost:8000/asr`.
 -   `--output`: Path to save the results JSON file. Default: `benchmark_results.json`.
 
@@ -57,6 +58,7 @@ python3 run_benchmark.py --dataset_path /path/to/LibriSpeech/dev-clean
 ```bash
 python3 benchmarking/run_benchmark.py \
   --dataset_path dataset/LibriSpeech/dev-clean \
+  --dataset_class LibriSpeechDataset \
   --url ws://localhost:8000/asr \
   --output benchmarking/results/dev-clean.json
 ```

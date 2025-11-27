@@ -4,79 +4,28 @@ import json
 import os
 import argparse
 import sys
-import string
 import time
 from tqdm import tqdm
-
-# Try to import jiwer, handle if missing
-try:
-    import jiwer
-    HAS_JIWER = True
-except ImportError:
-    HAS_JIWER = False
-    import numpy as np
+import jiwer
+import struct
 
 # Ensure we can import dataset
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from dataset import LibriSpeechDataset
+import dataset
 
-def normalize(text):
-    """
-    Normalize text to match LibriSpeech format (UPPERCASE, no punctuation).
-    """
-    # Replace common punctuation with spaces or remove
-    text = text.replace('.', '').replace(',', '').replace('?', '').replace('!', '')
-    text = text.replace('-', ' ') # Hyphens often split words in ASR output
-    # Remove other punctuation
-    text = text.translate(str.maketrans('', '', string.punctuation))
-    # Normalize whitespace
-    return " ".join(text.split()).upper()
-
-def calculate_wer(reference, hypothesis):
-    reference = normalize(reference)
-    hypothesis = normalize(hypothesis)
+async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file):
+    print(f"Loading dataset from {dataset_path} using class {dataset_class_name}...")
     
-    if len(reference) == 0:
-        return 1.0 if len(hypothesis) > 0 else 0.0
-
-    if HAS_JIWER:
-        return jiwer.wer(reference, hypothesis)
-    else:
-        # Levenshtein distance fallback
-        r = reference.split()
-        h = hypothesis.split()
+    try:
+        DatasetClass = getattr(dataset, dataset_class_name)
+    except AttributeError:
+        print(f"Error: Dataset class '{dataset_class_name}' not found in dataset.py")
+        sys.exit(1)
         
-        # Create matrix
-        d = np.zeros((len(r) + 1, len(h) + 1), dtype=int)
-        
-        for i in range(len(r) + 1):
-            d[i][0] = i
-        for j in range(len(h) + 1):
-            d[0][j] = j
-            
-        for i in range(1, len(r) + 1):
-            for j in range(1, len(h) + 1):
-                if r[i - 1] == h[j - 1]:
-                    d[i][j] = d[i - 1][j - 1]
-                else:
-                    substitution = d[i - 1][j - 1] + 1
-                    insertion = d[i][j - 1] + 1
-                    deletion = d[i - 1][j] + 1
-                    d[i][j] = min(substitution, insertion, deletion)
-                    
-        dist = d[len(r)][len(h)]
-        return float(dist) / len(r)
-
-async def process_file(audio_path, websocket_url):
-    # This function is deprecated in the new single-connection logic
-    pass
-
-async def run_benchmark(dataset_path, websocket_url, output_file):
-    print(f"Loading dataset from {dataset_path}...")
-    dataset = LibriSpeechDataset(dataset_path)
-    print(f"Found {len(dataset)} samples.")
+    dataset_instance = DatasetClass(dataset_path)
+    print(f"Found {len(dataset_instance)} samples.")
     
-    if len(dataset) == 0:
+    if len(dataset_instance) == 0:
         print("No samples found. Check the dataset path.")
         return
     
@@ -86,18 +35,13 @@ async def run_benchmark(dataset_path, websocket_url, output_file):
     
     print(f"Starting benchmark against {websocket_url}...")
     
-    pbar = tqdm(dataset)
+    pbar = tqdm(dataset_instance)
     
     for chapter_samples in pbar:
         if not chapter_samples:
             continue
             
-        # Derive a group ID from the first sample
-        first_id_parts = chapter_samples[0]['id'].split('-')
-        if len(first_id_parts) >= 2:
-            group_id = f"{first_id_parts[0]}-{first_id_parts[1]}"
-        else:
-            group_id = chapter_samples[0]['id']
+        group_id = dataset_instance.get_group_id(chapter_samples)
             
         try:
             # Create a new connection for each chapter
@@ -114,7 +58,6 @@ async def run_benchmark(dataset_path, websocket_url, output_file):
                 
                 # Generate dummy WAV header for 16kHz mono s16le if needed
                 if not use_audio_worklet:
-                    import struct
                     # minimal WAV header with 0 length (some players might dislike it, but ffmpeg usually handles it)
                     # or set to max size 0xFFFFFFFF
                     data_size = 0xFFFFFFFF
@@ -195,14 +138,21 @@ async def run_benchmark(dataset_path, websocket_url, output_file):
                 # Concatenate references
                 ref = " ".join([s['text'] for s in chapter_samples])
                 
-                wer_score = calculate_wer(ref, hyp)
+                norm_ref = dataset_instance.normalize(ref)
+                norm_hyp = dataset_instance.normalize(hyp)
+                
+                # Handle empty reference to avoid division by zero in WER if jiwer doesn't handle it as desired
+                if len(norm_ref) == 0:
+                     wer_score = 1.0 if len(norm_hyp) > 0 else 0.0
+                else:
+                     wer_score = jiwer.wer(norm_ref, norm_hyp)
                 
                 results.append({
                     "id": group_id,
                     "reference": ref,
                     "hypothesis": hyp,
-                    "normalized_reference": normalize(ref),
-                    "normalized_hypothesis": normalize(hyp),
+                    "normalized_reference": norm_ref,
+                    "normalized_hypothesis": norm_hyp,
                     "wer": wer_score,
                     "sample_count": len(chapter_samples)
                 })
@@ -236,17 +186,14 @@ async def run_benchmark(dataset_path, websocket_url, output_file):
     except Exception as e:
         print(f"Error saving results: {e}")
 
-async def process_sample(sample, websocket_url):
-    # This function is deprecated in the new single-connection logic
-    pass
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark WhisperLiveKit against LibriSpeech")
     parser.add_argument("--dataset_path", required=True, help="Path to LibriSpeech dataset root (e.g. /path/to/LibriSpeech)")
+    parser.add_argument("--dataset_class", required=True, help="Name of the dataset class in dataset.py (e.g. LibriSpeechDataset)")
     parser.add_argument("--url", default="ws://localhost:8000/asr", help="WebSocket URL of the running server")
     parser.add_argument("--output", default="benchmark_results.json", help="Output file for results")
     args = parser.parse_args()
     
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.url, args.output))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output))

@@ -1,4 +1,5 @@
 import os
+import string
 
 class LibriSpeechDataset:
     def __init__(self, root_dir):
@@ -57,9 +58,38 @@ class LibriSpeechDataset:
         # Sort chapters by the first sample's ID for consistent ordering
         self.samples.sort(key=lambda x: x[0]['id'] if x else "")
 
+    def normalize(self, text):
+        """
+        Normalize text to match LibriSpeech format (UPPERCASE, no punctuation).
+        """
+        # Replace common punctuation with spaces or remove
+        text = text.replace('.', '').replace(',', '').replace('?', '').replace('!', '')
+        text = text.replace('-', ' ') # Hyphens often split words in ASR output
+        # Remove other punctuation
+        text = text.translate(str.maketrans('', '', string.punctuation))
+        # Normalize whitespace
+        return " ".join(text.split()).upper()
+
+    def get_group_id(self, samples):
+        """
+        Derive a group ID from the samples in a chapter.
+        """
+        if not samples:
+            return "unknown"
+            
+        # Derive a group ID from the first sample
+        first_id_parts = samples[0]['id'].split('-')
+        if len(first_id_parts) >= 2:
+            group_id = f"{first_id_parts[0]}-{first_id_parts[1]}"
+        else:
+            group_id = samples[0]['id']
+        return group_id
+
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         return self.samples[idx]
 
+# Alias for generic usage
+Dataset = LibriSpeechDataset
