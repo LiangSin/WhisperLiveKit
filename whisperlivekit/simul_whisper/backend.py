@@ -48,13 +48,32 @@ class SimulStreamingOnlineProcessor:
         self.buffer = []
         self.committed: List[ASRToken] = []
         self.last_result_tokens: List[ASRToken] = []
-        self.load_new_backend()
+        self.model = None
+        # self.load_new_backend()
         
         #can be moved
         if asr.tokenizer:
-            self.model.tokenizer = asr.tokenizer
+            self.model_tokenizer = asr.tokenizer # Store temporarily or handle in start()
+
+    async def start(self):
+        import asyncio
+        def _load():
+            return self.asr.get_new_model_instance()
+            
+        model = await asyncio.to_thread(_load)
+        
+        self.model = PaddedAlignAttWhisper(
+            cfg=self.asr.cfg,
+            loaded_model=model,
+            mlx_encoder=self.asr.mlx_encoder,
+            fw_encoder=self.asr.fw_encoder,
+        )
+        if hasattr(self, 'model_tokenizer'):
+             self.model.tokenizer = self.model_tokenizer
 
     def load_new_backend(self):
+        # This method is kept for compatibility or synchronous usage if needed, 
+        # but start() should be preferred for async contexts.
         model = self.asr.get_new_model_instance()
         self.model = PaddedAlignAttWhisper(
             cfg=self.asr.cfg,
@@ -133,19 +152,29 @@ class SimulStreamingOnlineProcessor:
         except Exception as e:
             logger.exception(f"SimulStreaming warmup failed: {e}")
 
+    def close(self):
+        """Explicitly clean up resources."""
+        if self.model is not None:
+            self.model.remove_hooks()
+            self.model = None
+
     def __del__(self):
         # free the model and add a new model to stack.
         # del self.model
-        gc.collect()
-        torch.cuda.empty_cache()
+        # gc.collect()
+        # torch.cuda.empty_cache()
         # self.asr.new_model_to_stack()
-        self.model.remove_hooks()
+        pass
+        # Logic moved to close() to avoid race conditions during GC in threaded environments
+
+import threading
 
 class SimulStreamingASR():
     """SimulStreaming backend with AlignAtt policy."""
     sep = ""
 
     def __init__(self, logfile=sys.stderr, **kwargs):
+        self.lock = threading.Lock()
         self.logfile = logfile
         self.transcribe_kargs = {}
         
@@ -325,14 +354,15 @@ class SimulStreamingASR():
         SimulStreaming cannot share the same backend because it uses global forward hooks on the attention layers.
         Therefore, each user requires a separate model instance, which can be memory-intensive. To maintain speed, we preload the models into memory.
         """
-        if len(self.models) == 0:
-            self.models.append(self.load_model())
-        new_model = self.models.pop()
-        return new_model
-        # self.models[0]
+        with self.lock:
+            if len(self.models) == 0:
+                self.models.append(self.load_model())
+            new_model = self.models.pop()
+            return new_model
 
     def new_model_to_stack(self):
-        self.models.append(self.load_model())
+        with self.lock:
+             self.models.append(self.load_model())
         
 
     def set_translate_task(self):
@@ -351,3 +381,22 @@ class SimulStreamingASR():
         Warmup is done directly in load_model
         """
         pass
+
+    def replenish_pool(self):
+        with self.lock:
+            if len(self.models) >= self.preload_model_count:
+                return
+        
+        # If we need to load a model, we do it under lock to prevent double loading issues if multiple threads try to replenish or load
+        # Although this serializes loading, it prevents potential race conditions in underlying C/C++ libraries that might cause double frees
+        # when loading models concurrently.
+        try:
+            with self.lock:
+                # Check again under lock
+                if len(self.models) >= self.preload_model_count:
+                    return
+                logger.info(f"Replenishing model pool (current: {len(self.models)})...")
+                self.models.append(self.load_model())
+                logger.info(f"Model pool replenished (current: {len(self.models)}).")
+        except Exception as e:
+            logger.error(f"Failed to replenish model pool: {e}")
