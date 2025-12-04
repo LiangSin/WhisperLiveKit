@@ -47,7 +47,20 @@ info "Installing benchmarking dependencies..."
 pip install -r benchmarking/requirements.txt
 
 info "Installing additional dependencies..."
-pip install safetensors faster_whisper huggingface_hub
+pip install safetensors faster_whisper huggingface_hub yt-dlp
+
+info "Checking for ffmpeg..."
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  info "ffmpeg not found in PATH. Attempting to install via conda..."
+  if ! command -v conda >/dev/null 2>&1; then
+    error "conda is not available; cannot install ffmpeg automatically. Please install ffmpeg manually and re-run this script."
+    exit 1
+  fi
+  conda install -y ffmpeg
+  success "ffmpeg installed via conda."
+else
+  info "ffmpeg found in PATH. Skipping conda installation."
+fi
 
 TARGET_LINK="$REPO_ROOT/models/cool-whisper"
 if [[ ! -e "$TARGET_LINK" ]]; then

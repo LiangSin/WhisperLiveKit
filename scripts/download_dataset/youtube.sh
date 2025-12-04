@@ -86,20 +86,27 @@ for CHANNEL_URL in "${CHANNEL_URLS[@]}"; do
   echo "========================================"
   echo "  Source URL  : $CHANNEL_URL"
   echo "========================================"
-  yt-dlp \
+  if ! yt-dlp \
     --yes-playlist \
     --extract-audio \
     --audio-format wav \
     --audio-quality 0 \
     --write-subs \
     --write-auto-subs \
-    --sub-langs zh-TW \
-    --sub-format vtt \
+    --sub-langs zh-TW,en \
+    --sub-format srt \
     --paths "$OUTPUT_DIR" \
     --output "%(uploader_id)s/%(playlist_id)s/%(id)s.%(ext)s" \
-    -- "$CHANNEL_URL"
+    -- "$CHANNEL_URL"; then
+    status=$?
+    echo "Warning: yt-dlp failed for $CHANNEL_URL (exit code $status), skipping..." >&2
+    continue
+  fi
 done
 
+RESET='\033[0m'
+BOLD='\033[1m'
+GREEN='\033[32m'
 
-echo "\033[1m\033[32mDownload completed.\033[0m Check output directory: $OUTPUT_DIR"
+echo -e "${BOLD}${GREEN}Download completed.${RESET} Check output directory: $OUTPUT_DIR"
 
