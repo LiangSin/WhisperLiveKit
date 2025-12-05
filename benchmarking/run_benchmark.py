@@ -6,7 +6,6 @@ import argparse
 import sys
 import time
 from tqdm import tqdm
-import jiwer
 import struct
 
 # Ensure we can import dataset
@@ -30,7 +29,7 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
         return
     
     results = []
-    total_wer = 0.0
+    total_error_ratio = 0.0
     count = 0
     
     print(f"Starting benchmark against {websocket_url}...")
@@ -140,12 +139,9 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                 
                 norm_ref = dataset_instance.normalize(ref)
                 norm_hyp = dataset_instance.normalize(hyp)
-                
-                # Handle empty reference to avoid division by zero in WER if jiwer doesn't handle it as desired
-                if len(norm_ref) == 0:
-                     wer_score = 1.0 if len(norm_hyp) > 0 else 0.0
-                else:
-                     wer_score = jiwer.wer(norm_ref, norm_hyp)
+
+                # Delegate error metric computation to the dataset implementation
+                error_ratio = dataset_instance.compute_error_ratio(ref, hyp)
                 
                 results.append({
                     "id": group_id,
@@ -153,12 +149,12 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     "hypothesis": hyp,
                     "normalized_reference": norm_ref,
                     "normalized_hypothesis": norm_hyp,
-                    "wer": wer_score,
+                    "error_ratio": error_ratio,
                     "sample_count": len(chapter_samples)
                 })
-                total_wer += wer_score
+                total_error_ratio += error_ratio
                 count += 1
-                pbar.set_description(f"Avg WER: {total_wer/count:.4f}")
+                pbar.set_description(f"Avg error_ratio: {total_error_ratio/count:.4f}")
 
         except Exception as e:
             print(f"Error processing group {group_id}: {e}")
@@ -168,9 +164,9 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
             })
 
     if count > 0:
-        avg_wer = total_wer / count
+        avg_error_ratio = total_error_ratio / count
         print(f"\nBenchmark complete. Processed {count} samples.")
-        print(f"Average WER: {avg_wer:.4f}")
+        print(f"Average error_ratio: {avg_error_ratio:.4f}")
     else:
         print("\nBenchmark complete. No samples processed successfully.")
 

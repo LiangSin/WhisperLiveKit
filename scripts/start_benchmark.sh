@@ -34,7 +34,7 @@ extra_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --libri|--libri-debug)
+    --libri|--libri-debug|--youtube|--youtube-debug)
       if [[ -n "$preset" ]]; then
         echo "Multiple presets specified. Choose only one." >&2
         usage
@@ -72,6 +72,20 @@ case "$preset" in
       --dataset_path dataset/LibriSpeech/dev-clean-debug
       --dataset_class LibriSpeechDataset
       --output benchmarking/results/libri-dev-clean-debug.json
+    )
+    ;;
+  --youtube)
+    preset_args=(
+      --dataset_path dataset/youtube_data
+      --dataset_class YoutubeDataset
+      --output benchmarking/results/youtube.json
+    )
+    ;;
+  --youtube-debug)
+    preset_args=(
+      --dataset_path dataset/youtube_data/debug
+      --dataset_class YoutubeDataset
+      --output benchmarking/results/youtube-debug.json
     )
     ;;
 esac

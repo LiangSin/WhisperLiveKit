@@ -7,11 +7,11 @@ cd "$REPO_ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/start_server.sh --cuda <id> --modal <model_path>
+Usage: scripts/start_server.sh --cuda <id> --model <model_path>
 
 Required arguments:
   --cuda      GPU id for CUDA_VISIBLE_DEVICES
-  --modal     Model path to pass to whisperlivekit-server
+  --model     Model path to pass to whisperlivekit-server
 EOF
   exit 1
 }
@@ -26,7 +26,7 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || usage
       cuda_id="$1"
       ;;
-    --modal)
+    --model)
       shift
       [[ $# -gt 0 ]] || usage
       model_path="$1"
