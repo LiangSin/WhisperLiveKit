@@ -45,6 +45,10 @@ done
 export CUDA_VISIBLE_DEVICES="$cuda_id"
 echo "CUDA_VISIBLE_DEVICES set to $CUDA_VISIBLE_DEVICES"
 
+# Suppress noisy Caffe2/NNPACK warnings (AMD CPUs often trigger these)
+export GLOG_minloglevel=${GLOG_minloglevel:-2}
+export TORCH_CPP_LOG_LEVEL=${TORCH_CPP_LOG_LEVEL:-ERROR}
+
 LOG_DIR="$REPO_ROOT/logs"
 mkdir -p "$LOG_DIR"
 TIMESTAMP="$(date +"%m%d-%H%M")"
