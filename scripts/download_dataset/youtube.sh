@@ -24,19 +24,19 @@ cd "${DATASET_DIR}"
 # Configuration: Edit the channel URL here
 # ============================================
 CHANNEL_URLS=(
-  # "https://www.youtube.com/watch?v=P0QGcyEhFsw&list=PLCX-BLZ1hDpBjBFXoUat1lakxrPYp2bRd"
-  # "https://www.youtube.com/watch?v=TfkgUaXgMLo&list=PLCX-BLZ1hDpAparCQIfqgmjVkLnX9pPZ4"
-  # "https://www.youtube.com/watch?v=fzS3jBov86w&list=PLCX-BLZ1hDpDojkD7e92LfwTT_x6ierVN"
-  # "https://www.youtube.com/watch?v=imK5_767Z_4&list=PLCX-BLZ1hDpDyJhcvZNaGcomSTAgfPfKC"
-  # "https://www.youtube.com/watch?v=Wiv1dUsPihA&list=PLCX-BLZ1hDpCxlZxPO6RRTcwauTl683Vt"
-  # "https://www.youtube.com/watch?v=gp8_fqK0FGE&list=PLCX-BLZ1hDpA0mvnbfYLBvbKJYYtWgks-"
-  # "https://www.youtube.com/watch?v=y-IKSJqiBlo&list=PLCX-BLZ1hDpCFVMNsDEymt5gxVjhXq2XY"
-  # "https://www.youtube.com/watch?v=HTK8_8mEZWM&list=PLCX-BLZ1hDpA7xbmlovu7zzdM8oefFm1q"
-  # "https://www.youtube.com/watch?v=yOoru8zZZIs&list=PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK"
-  # "https://www.youtube.com/watch?v=BI_ywtB3wLY&list=PLCX-BLZ1hDpCWfv4UrMiAX4qGg9rC0W6m"
-  # "https://www.youtube.com/watch?v=_oD4AKCq2Tw&list=PLfjnaD_kBFeSkLN7mpE3Ua5-3Kt2PJuOt"
-  # "https://www.youtube.com/watch?v=QLiKmca4kzI&list=PLJV_el3uVTsNZEFAdQsDeOdzAaHTca2Gi"
-  # "https://www.youtube.com/watch?v=AVIKFXLCPY8&list=PLJV_el3uVTsPz6CTopeRp2L2t4aL_KgiI"
+  "https://www.youtube.com/watch?v=P0QGcyEhFsw&list=PLCX-BLZ1hDpBjBFXoUat1lakxrPYp2bRd"
+  "https://www.youtube.com/watch?v=TfkgUaXgMLo&list=PLCX-BLZ1hDpAparCQIfqgmjVkLnX9pPZ4"
+  "https://www.youtube.com/watch?v=fzS3jBov86w&list=PLCX-BLZ1hDpDojkD7e92LfwTT_x6ierVN"
+  "https://www.youtube.com/watch?v=imK5_767Z_4&list=PLCX-BLZ1hDpDyJhcvZNaGcomSTAgfPfKC"
+  "https://www.youtube.com/watch?v=Wiv1dUsPihA&list=PLCX-BLZ1hDpCxlZxPO6RRTcwauTl683Vt"
+  "https://www.youtube.com/watch?v=gp8_fqK0FGE&list=PLCX-BLZ1hDpA0mvnbfYLBvbKJYYtWgks-"
+  "https://www.youtube.com/watch?v=y-IKSJqiBlo&list=PLCX-BLZ1hDpCFVMNsDEymt5gxVjhXq2XY"
+  "https://www.youtube.com/watch?v=HTK8_8mEZWM&list=PLCX-BLZ1hDpA7xbmlovu7zzdM8oefFm1q"
+  "https://www.youtube.com/watch?v=yOoru8zZZIs&list=PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK"
+  "https://www.youtube.com/watch?v=BI_ywtB3wLY&list=PLCX-BLZ1hDpCWfv4UrMiAX4qGg9rC0W6m"
+  "https://www.youtube.com/watch?v=_oD4AKCq2Tw&list=PLfjnaD_kBFeSkLN7mpE3Ua5-3Kt2PJuOt"
+  "https://www.youtube.com/watch?v=QLiKmca4kzI&list=PLJV_el3uVTsNZEFAdQsDeOdzAaHTca2Gi"
+  "https://www.youtube.com/watch?v=AVIKFXLCPY8&list=PLJV_el3uVTsPz6CTopeRp2L2t4aL_KgiI"
   "https://www.youtube.com/watch?v=7wMYhPUGy40&list=PLXVfgk9fNX2LdYV_KJH9LtbqTzg7r_CN9"
   # "https://www.youtube.com/@NTUOCW"
   # "https://www.youtube.com/@NTUSpeech"
@@ -108,5 +108,5 @@ RESET='\033[0m'
 BOLD='\033[1m'
 GREEN='\033[32m'
 
-echo -e "${BOLD}${GREEN}Download completed.${RESET} Check output directory: $OUTPUT_DIR"
+echo -e "${BOLD}${GREEN}[Download completed]${RESET} Check output directory: $OUTPUT_DIR"
 
