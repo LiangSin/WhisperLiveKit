@@ -68,6 +68,9 @@ class SimulStreamingOnlineProcessor:
             mlx_encoder=self.asr.mlx_encoder,
             fw_encoder=self.asr.fw_encoder,
         )
+        # Ensure kv_cache/decoder state are clean for a fresh connection
+        self.model._clean_cache()
+        self.model.refresh_segment(complete=True)
         if hasattr(self, 'model_tokenizer'):
              self.model.tokenizer = self.model_tokenizer
 
@@ -81,6 +84,9 @@ class SimulStreamingOnlineProcessor:
             mlx_encoder=self.asr.mlx_encoder,
             fw_encoder=self.asr.fw_encoder,
             )
+        # Ensure kv_cache/decoder state are clean for a fresh connection
+        self.model._clean_cache()
+        self.model.refresh_segment(complete=True)
 
     def start_silence(self):
         tokens, processed_upto = self.process_iter(is_last=True)
