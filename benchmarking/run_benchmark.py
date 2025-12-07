@@ -10,18 +10,18 @@ import struct
 
 # Ensure we can import dataset
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-import dataset
+import DatasetClass
 
-async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file):
+async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False):
     print(f"Loading dataset from {dataset_path} using class {dataset_class_name}...")
     
     try:
-        DatasetClass = getattr(dataset, dataset_class_name)
+        DSClass = getattr(DatasetClass, dataset_class_name)
     except AttributeError:
-        print(f"Error: Dataset class '{dataset_class_name}' not found in dataset.py")
+        print(f"Error: Dataset class '{dataset_class_name}' not found in DatasetClass/")
         sys.exit(1)
         
-    dataset_instance = DatasetClass(dataset_path)
+    dataset_instance = DSClass(dataset_path)
     print(f"Found {len(dataset_instance)} samples.")
     
     if len(dataset_instance) == 0:
@@ -52,6 +52,9 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                 except json.JSONDecodeError:
                     print(f"Error decoding config message: {config_msg}")
                     config = {}
+
+                if debug:
+                    print(f"[DEBUG] Connected to {websocket_url}, config: {config}")
                     
                 use_audio_worklet = config.get("useAudioWorklet", False)
                 
@@ -67,6 +70,8 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     wav_header += b'data' + struct.pack('<I', data_size)
                     
                     # Send header first
+                    if debug:
+                        print(f"[DEBUG] Sending WAV header for group {group_id}")
                     await websocket.send(wav_header)
 
                 # State variable to track transcript for the whole chapter
@@ -81,57 +86,56 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                         if current_text:
                             final_transcript_for_chapter = current_text
 
-                # Process all samples in the chapter
-                for sample in chapter_samples:
-                    # 1. Prepare audio
-                    # Always convert to PCM s16le 16000Hz
-                    process = await asyncio.create_subprocess_exec(
-                        "ffmpeg", "-i", sample['audio_path'], 
-                        "-f", "s16le", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", 
-                        "pipe:1",
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.DEVNULL
-                    )
-                    audio_data, _ = await process.communicate()
-                    
-                    # 2. Send audio
-                    chunk_size = 4096
-                    for i in range(0, len(audio_data), chunk_size):
-                        await websocket.send(audio_data[i:i+chunk_size])
-                        await asyncio.sleep(0.001) 
-                        
-                        # Consume messages while sending to update buffer
-                        try:
-                            while True:
-                                msg = await asyncio.wait_for(websocket.recv(), timeout=0.0001)
-                                data = json.loads(msg)
-                                update_transcript(data)
-                        except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
-                            pass
-                
-                # 3. Send End of Stream signal (Empty Bytes)
-                # This triggers the server to flush buffers and finish processing
-                await websocket.send(b"")
+                async def send_audio():
+                    """Stream audio chunks to the websocket."""
+                    for sample in chapter_samples:
+                        process = await asyncio.create_subprocess_exec(
+                            "ffmpeg", "-i", sample['audio_path'],
+                            "-f", "s16le", "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le",
+                            "pipe:1",
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.DEVNULL
+                        )
+                        while True:
+                            chunk = await process.stdout.read(4096)
+                            if not chunk:
+                                break
+                            await websocket.send(chunk)
+                            await asyncio.sleep(0.05)
 
-                # 4. Wait for "ready_to_stop" signal
-                
-                while True:
-                    try:
-                        msg = await asyncio.wait_for(websocket.recv(), timeout=30.0)
-                        data = json.loads(msg)
-                        
-                        # Check for stop signal
-                        if data.get("type") == "ready_to_stop":
+                    # Send End of Stream signal (Empty Bytes)
+                    await websocket.send(b"")
+                    if debug:
+                        print(f"[DEBUG] Sent EOS for group {group_id}")
+
+                async def receive_messages():
+                    """Receive server messages until ready_to_stop."""
+                    while True:
+                        try:
+                            msg = await websocket.recv()
+                            data = json.loads(msg)
+                            if data.get("type") == "ready_to_stop":
+                                if debug:
+                                    print(f"[DEBUG] Received ready_to_stop for group {group_id}")
+                                break
+                            update_transcript(data)
+                        except websockets.exceptions.ConnectionClosed:
+                            print(f"Connection closed while waiting to stop for {group_id}")
                             break
-                            
-                        update_transcript(data)
-                                
-                    except asyncio.TimeoutError:
-                        print(f"Timeout waiting for completion on group {group_id}")
-                        break
-                    except websockets.exceptions.ConnectionClosed:
-                        # Connection closed by server (could be normal or error)
-                        break
+                        except json.JSONDecodeError as e:
+                            print(f"Error decoding message for group {group_id}: {e}")
+                            continue
+
+                # Run send and receive concurrently to simulate streaming
+                send_task = asyncio.create_task(send_audio())
+                recv_task = asyncio.create_task(receive_messages())
+                try:
+                    await asyncio.gather(send_task, recv_task)
+                finally:
+                    # Ensure both tasks are cancelled if one fails
+                    for t in (send_task, recv_task):
+                        if not t.done():
+                            t.cancel()
 
                 hyp = final_transcript_for_chapter.strip()
                 # Concatenate references
@@ -141,7 +145,7 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                 norm_hyp = dataset_instance.normalize(hyp)
 
                 # Delegate error metric computation to the dataset implementation
-                error_ratio = dataset_instance.compute_error_ratio(ref, hyp)
+                error_ratio = dataset_instance.compute_error_ratio(norm_ref, norm_hyp)
                 
                 results.append({
                     "id": group_id,
@@ -185,11 +189,12 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark WhisperLiveKit against LibriSpeech")
     parser.add_argument("--dataset_path", required=True, help="Path to LibriSpeech dataset root (e.g. /path/to/LibriSpeech)")
-    parser.add_argument("--dataset_class", required=True, help="Name of the dataset class in dataset.py (e.g. LibriSpeechDataset)")
+    parser.add_argument("--dataset_class", required=True, help="Name of the dataset class in DatasetClass/ (e.g. LibriSpeechDataset)")
     parser.add_argument("--url", default="ws://localhost:8000/asr", help="WebSocket URL of the running server")
     parser.add_argument("--output", default="benchmark_results.json", help="Output file for results")
+    parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
     args = parser.parse_args()
     
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=True))

@@ -28,7 +28,6 @@ CHANNEL_URLS=(
   "https://www.youtube.com/watch?v=fzS3jBov86w&list=PLCX-BLZ1hDpDojkD7e92LfwTT_x6ierVN"
   "https://www.youtube.com/watch?v=y-IKSJqiBlo&list=PLCX-BLZ1hDpCFVMNsDEymt5gxVjhXq2XY"
   "https://www.youtube.com/watch?v=yOoru8zZZIs&list=PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK"
-  "https://www.youtube.com/watch?v=_oD4AKCq2Tw&list=PLfjnaD_kBFeSkLN7mpE3Ua5-3Kt2PJuOt"
   "https://www.youtube.com/watch?v=QLiKmca4kzI&list=PLJV_el3uVTsNZEFAdQsDeOdzAaHTca2Gi"
   "https://www.youtube.com/watch?v=AVIKFXLCPY8&list=PLJV_el3uVTsPz6CTopeRp2L2t4aL_KgiI"
   "https://www.youtube.com/watch?v=7wMYhPUGy40&list=PLXVfgk9fNX2LdYV_KJH9LtbqTzg7r_CN9"
