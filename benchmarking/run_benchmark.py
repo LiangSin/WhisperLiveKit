@@ -197,4 +197,4 @@ if __name__ == "__main__":
     
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=True))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug))

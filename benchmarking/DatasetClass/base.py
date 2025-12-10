@@ -14,7 +14,7 @@ class BaseDataset:
         Default normalization (LibriSpeech style).
         """
         # Replace common punctuation with spaces or remove
-        text = text.replace('.', '').replace(',', '').replace('?', '').replace('!', '')
+        text = text.replace('.', ' ').replace(',', ' ').replace('?', ' ').replace('!', ' ')
         text = text.replace('-', ' ') # Hyphens often split words in ASR output
         # Remove other punctuation
         text = text.translate(str.maketrans('', '', string.punctuation))

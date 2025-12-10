@@ -86,7 +86,7 @@ for CHANNEL_URL in "${CHANNEL_URLS[@]}"; do
     --audio-quality 0 \
     --write-subs \
     --write-auto-subs \
-    --sub-langs zh*,en \
+    --sub-langs zh*,zh-TW \
     --sub-format srt \
     --paths "$OUTPUT_DIR" \
     --output "%(uploader_id)s/%(playlist_id)s/%(id)s.%(ext)s" \

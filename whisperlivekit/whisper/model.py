@@ -235,6 +235,25 @@ class TextDecoder(nn.Module):
             the encoded audio features to be attended on
         """
         offset = next(iter(kv_cache.values())).shape[1] if kv_cache else 0
+
+        # Sliding window: keep only the most recent tokens to prevent unlimited growth
+        max_total_length = self.positional_embedding.shape[0]
+        total_length = offset + x.shape[-1]
+
+        # Ensure we never exceed the maximum context length
+        if total_length > max_total_length:
+            if kv_cache:
+                # Clear entire cache if we can't fit current input
+                for module_cache_id in kv_cache:
+                    kv_cache[module_cache_id] = None
+                offset = 0
+                total_length = x.shape[-1]
+
+            # If input is still too long, truncate it
+            if x.shape[-1] > max_total_length:
+                x = x[:, :max_total_length]
+                total_length = max_total_length
+
         x = (
             self.token_embedding(x)
             + self.positional_embedding[offset : offset + x.shape[-1]]

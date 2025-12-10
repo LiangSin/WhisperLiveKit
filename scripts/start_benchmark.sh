@@ -7,18 +7,10 @@ cd "$REPO_ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/run_benchmark_preset.sh (--libri | --libri-debug) [additional args...]
+Usage: scripts/run_benchmark_preset.sh --<preset> [additional args...]
 
 Presets:
-  --libri        Expands to:
-                 --dataset_path dataset/LibriSpeech/dev-clean
-                 --dataset_class LibriSpeechDataset
-                 --output benchmarking/results/libri-dev-clean.json
-
-  --libri-debug  Expands to:
-                 --dataset_path dataset/LibriSpeech/dev-clean-debug
-                 --dataset_class LibriSpeechDataset
-                 --output benchmarking/results/libri-dev-clean-debug.json
+  --libri, --libri-debug, --youtube, --youtube-debug
 
 Any extra arguments after the preset flag are forwarded to benchmarking/run_benchmark.py.
 EOF
