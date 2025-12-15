@@ -9,6 +9,7 @@ from whisperlivekit.whisper import load_model, tokenizer
 from whisperlivekit.whisper.audio import TOKENS_PER_SECOND
 import os
 import gc
+import time
 from pathlib import Path
 from whisperlivekit.model_paths import model_path_and_type, resolve_model_path
 from whisperlivekit.backend_support import (
@@ -140,6 +141,15 @@ class SimulStreamingOnlineProcessor:
                 return [], self.end
             
             self.committed.extend(timestamped_words)
+
+            # Gradual cleanup to prevent state accumulation
+            # Clean up old committed tokens when they exceed a threshold
+            if len(self.committed) > 1500:  # Start cleaning at 1500 tokens
+                # Keep the most recent 1000 tokens to maintain context
+                removed_count = len(self.committed) - 1000
+                self.committed = self.committed[-1000:]
+                logger.info(f"Gradually cleaned up {removed_count} old committed tokens, keeping recent 1000")
+
             self.buffer = []
             return timestamped_words, self.end
 
