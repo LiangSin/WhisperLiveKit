@@ -94,4 +94,14 @@ else
   info "models/cool-whisper already exists. Skipping download."
 fi
 
+info "Checking for SSL certificates..."
+if [[ ! -f "ssl-config/key.pem" ]] || [[ ! -f "ssl-config/cert.pem" ]]; then
+  info "SSL certificates not found. Generating self-signed certificates..."
+  mkdir -p ssl-config
+  openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout ssl-config/key.pem -out ssl-config/cert.pem -subj "/CN=whisperlivekit"
+  success "SSL certificates generated in ssl-config/"
+else
+  info "SSL certificates already exist. Skipping generation."
+fi
+
 success "Environment setup complete."

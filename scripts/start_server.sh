@@ -12,12 +12,21 @@ Usage: scripts/start_server.sh --cuda <id> --model <model_path>
 Required arguments:
   --cuda      GPU id for CUDA_VISIBLE_DEVICES
   --model     Model path to pass to whisperlivekit-server
+
+Optional arguments:
+  --bind      Bind host address
+  --allowed-ips <ips>           Comma-separated list of allowed IP addresses
+                                Example: "192.168.1.100,10.0.0.50"
+  --allowed-networks <networks> Comma-separated list of allowed IP networks in CIDR notation
+                                Example: "192.168.1.0/24,140.112.91.0/24"
 EOF
   exit 1
 }
 
 cuda_id=""
 model_path=""
+allowed_ips=""
+allowed_networks=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -31,6 +40,21 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || usage
       model_path="$1"
       ;;
+    --allowed-ips)
+      shift
+      [[ $# -gt 0 ]] || usage
+      allowed_ips="$1"
+      ;;
+    --allowed-networks)
+      shift
+      [[ $# -gt 0 ]] || usage
+      allowed_networks="$1"
+      ;;
+    --bind)
+      shift
+      [[ $# -gt 0 ]] || usage
+      bind_host="$1"
+      ;;
     *)
       echo "Unknown argument: $1"
       usage
@@ -42,8 +66,20 @@ done
 [[ -n "$cuda_id" ]] || usage
 [[ -n "$model_path" ]] || usage
 
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$cuda_id"
 echo "CUDA_VISIBLE_DEVICES set to $CUDA_VISIBLE_DEVICES"
+
+cmd_args="--model-path $model_path"
+if [[ -n "$allowed_ips" ]]; then
+    cmd_args="$cmd_args --allowed-ips $allowed_ips"
+fi
+if [[ -n "$allowed_networks" ]]; then
+    cmd_args="$cmd_args --allowed-networks $allowed_networks"
+fi
+if [[ -n "$bind_host" ]]; then
+    cmd_args="$cmd_args --host $bind_host --ssl-certfile ssl-config/cert.pem --ssl-keyfile ssl-config/key.pem"
+fi
 
 # Suppress noisy Caffe2/NNPACK warnings (AMD CPUs often trigger these)
 export GLOG_minloglevel=${GLOG_minloglevel:-2}
@@ -56,7 +92,7 @@ LOG_FILE="$LOG_DIR/$TIMESTAMP.log"
 
 echo "Starting whisperlivekit-server with model: $model_path"
 echo "Logs will be written to $LOG_FILE"
-whisperlivekit-server --model-path "$model_path" > "$LOG_FILE" 2>&1 &
+whisperlivekit-server $cmd_args > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 echo "Press Ctrl+C to stop the server."

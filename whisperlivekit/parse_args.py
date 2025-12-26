@@ -182,6 +182,20 @@ def parse_args():
     parser.add_argument("--ssl-certfile", type=str, help="Path to the SSL certificate file.", default=None)
     parser.add_argument("--ssl-keyfile", type=str, help="Path to the SSL private key file.", default=None)
     parser.add_argument("--forwarded-allow-ips", type=str, help="Allowed ips for reverse proxying.", default=None)
+
+    # IP restriction arguments
+    parser.add_argument(
+        "--allowed-ips",
+        type=str,
+        default=None,
+        help="Comma-separated list of allowed IP addresses (e.g., '192.168.1.1,10.0.0.1'). If not specified, all IPs are allowed."
+    )
+    parser.add_argument(
+        "--allowed-networks",
+        type=str,
+        default=None,
+        help="Comma-separated list of allowed IP networks in CIDR notation (e.g., '192.168.1.0/24,10.0.0.0/8'). If not specified, all networks are allowed."
+    )
     parser.add_argument(
         "--pcm-input",
         action="store_true",

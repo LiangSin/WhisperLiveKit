@@ -3,6 +3,7 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 from whisperlivekit import TranscriptionEngine, AudioProcessor, get_inline_ui_html, parse_args
+from whisperlivekit.ip_middleware import create_ip_middleware
 import asyncio
 import logging
 
@@ -31,6 +32,18 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Initialize IP restriction checker if configured
+ip_checker = None
+if args.allowed_ips or args.allowed_networks:
+    allowed_ips = args.allowed_ips.split(',') if args.allowed_ips else None
+    allowed_networks = args.allowed_networks.split(',') if args.allowed_networks else None
+
+    ip_checker = create_ip_middleware(
+        allowed_ips=allowed_ips,
+        allowed_networks=allowed_networks
+    )
+    app.middleware("http")(ip_checker)
+
 @app.get("/")
 async def get():
     return HTMLResponse(get_inline_ui_html())
@@ -52,6 +65,27 @@ async def handle_websocket_results(websocket, results_generator):
 
 @app.websocket("/asr")
 async def websocket_endpoint(websocket: WebSocket):
+    # Check IP restrictions for WebSocket connections
+    if ip_checker:
+        client_ip = None
+        # Check X-Forwarded-For header (for proxies)
+        x_forwarded_for = websocket.headers.get("X-Forwarded-For")
+        if x_forwarded_for:
+            client_ip = x_forwarded_for.split(",")[0].strip()
+        else:
+            # Direct connection - use websocket.client.host
+            client_ip = websocket.client.host if websocket.client else None
+
+        if not client_ip:
+            logger.warning("Could not determine client IP address for WebSocket")
+            await websocket.close(code=1008)  # Policy violation
+            return
+
+        if not ip_checker.is_ip_allowed(client_ip):
+            logger.warning(f"WebSocket access denied for IP: {client_ip}")
+            await websocket.close(code=1008)  # Policy violation
+            return
+
     global transcription_engine
     audio_processor = AudioProcessor(
         transcription_engine=transcription_engine,
