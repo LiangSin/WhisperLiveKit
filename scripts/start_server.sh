@@ -27,6 +27,8 @@ cuda_id=""
 model_path=""
 allowed_ips=""
 allowed_networks=""
+bind_host=""
+passthrough_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -56,8 +58,8 @@ while [[ $# -gt 0 ]]; do
       bind_host="$1"
       ;;
     *)
-      echo "Unknown argument: $1"
-      usage
+      # Unknown args should be passed through to whisperlivekit-server
+      passthrough_args+=("$1")
       ;;
   esac
   shift
@@ -70,15 +72,18 @@ export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$cuda_id"
 echo "CUDA_VISIBLE_DEVICES set to $CUDA_VISIBLE_DEVICES"
 
-cmd_args="--model-path $model_path"
+cmd_args=(--model-path $model_path)
 if [[ -n "$allowed_ips" ]]; then
-    cmd_args="$cmd_args --allowed-ips $allowed_ips"
+  cmd_args+=(--allowed-ips $allowed_ips)
 fi
 if [[ -n "$allowed_networks" ]]; then
-    cmd_args="$cmd_args --allowed-networks $allowed_networks"
+  cmd_args+=(--allowed-networks $allowed_networks)
 fi
 if [[ -n "$bind_host" ]]; then
-    cmd_args="$cmd_args --host $bind_host --ssl-certfile ssl-config/cert.pem --ssl-keyfile ssl-config/key.pem"
+  cmd_args+=(--host $bind_host --ssl-certfile ssl-config/cert.pem --ssl-keyfile ssl-config/key.pem)
+fi
+if [[ ${#passthrough_args[@]} -gt 0 ]]; then
+  cmd_args+=("${passthrough_args[@]}")
 fi
 
 # Suppress noisy Caffe2/NNPACK warnings (AMD CPUs often trigger these)
@@ -92,7 +97,7 @@ LOG_FILE="$LOG_DIR/$TIMESTAMP.log"
 
 echo "Starting whisperlivekit-server with model: $model_path"
 echo "Logs will be written to $LOG_FILE"
-whisperlivekit-server $cmd_args > "$LOG_FILE" 2>&1 &
+whisperlivekit-server "${cmd_args[@]}" > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 echo "Server PID: $SERVER_PID"
 echo "Press Ctrl+C to stop the server."
