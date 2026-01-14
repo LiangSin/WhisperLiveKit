@@ -404,6 +404,21 @@ class AudioProcessor:
         # the idea is to ignore diarization for the moment. We use only transcription tokens. 
         # And the speaker is attributed given the segments used for the translation
         # in the future we want to have different languages for each speaker etc, so it will be more complex.
+        try:
+            # Optional dependency; only used for silence-driven flush heuristics
+            from nllw import MIN_SILENCE_DURATION_DEL_BUFFER
+        except Exception:
+            MIN_SILENCE_DURATION_DEL_BUFFER = 1.0
+
+        # NLLW internally gates translation with: `len(buffer_text.strip().split()) >= 3`.
+        # For CJK languages, ASR tokens often come without spaces, so `.split()` returns 1 and
+        # translation never triggers. To make translation usable, we feed NLLW TimedText tokens
+        # with simple whitespace separation between non-punctuation tokens.
+        try:
+            from nllw.timed_text import TimedText as NLLWTimedText
+        except Exception:
+            NLLWTimedText = None
+
         while True:
             try:
                 item = await self.translation_queue.get() #block until at least 1 token
@@ -411,8 +426,21 @@ class AudioProcessor:
                     logger.debug("Translation processor received sentinel. Finishing.")
                     self.translation_queue.task_done()
                     break
-                elif type(item) is Silence:
-                    self.translation.insert_silence(item.duration)
+                elif isinstance(item, Silence):
+                    # Never forward Silence objects into NLLW buffers; its backend expects tokens with `.text`.
+                    # We only use ended silences as a heuristic boundary to flush/reset translation state.
+                    if getattr(item, "has_ended", False) and item.duration and item.duration >= MIN_SILENCE_DURATION_DEL_BUFFER:
+                        flushed, empty = self.translation.validate_buffer_and_reset(item.duration)
+                        if flushed and getattr(flushed, "text", ""):
+                            async with self.lock:
+                                existing = self.state.translation_validated_segments
+                                if not isinstance(existing, list):
+                                    existing = [existing] if existing else []
+                                existing.append(flushed)
+                                # Keep memory bounded
+                                self.state.translation_validated_segments = existing[-200:]
+                                self.state.buffer_translation = empty
+                    self.translation_queue.task_done()
                     continue
                 
                 # get all the available tokens for translation. The more words, the more precise
@@ -420,21 +448,64 @@ class AudioProcessor:
                 additional_tokens = await get_all_from_queue(self.translation_queue)
                 
                 sentinel_found = False
+                flush_on_silence = False
                 for additional_token in additional_tokens:
                     if additional_token is SENTINEL:
                         sentinel_found = True
                         break
-                    elif type(additional_token) is Silence and additional_token.has_ended:
-                        self.translation.insert_silence(additional_token.duration)
+                    elif isinstance(additional_token, Silence):
+                        # Filter out Silence tokens entirely (including "silence starting"), and use
+                        # ended silences as a signal to flush/reset after processing the batch.
+                        if getattr(additional_token, "has_ended", False) and additional_token.duration and additional_token.duration >= MIN_SILENCE_DURATION_DEL_BUFFER:
+                            flush_on_silence = True
                         continue
                     else:
                         tokens_to_process.append(additional_token)                
                 if tokens_to_process:
-                    self.translation.insert_tokens(tokens_to_process)
+                    if NLLWTimedText is not None:
+                        punctuation_marks = {".", "!", "?", "。", "！", "？"}
+                        normalized_tokens = []
+                        for t in tokens_to_process:
+                            txt = getattr(t, "text", "") or ""
+                            if not txt:
+                                continue
+                            try:
+                                is_punct = bool(getattr(t, "is_punctuation", lambda: False)())
+                            except Exception:
+                                is_punct = txt.strip() in punctuation_marks
+                            if not is_punct and not txt.endswith(" "):
+                                txt = txt + " "
+                            normalized_tokens.append(
+                                NLLWTimedText(
+                                    text=txt,
+                                    start=getattr(t, "start", 0) or 0,
+                                    end=getattr(t, "end", 0) or 0,
+                                )
+                            )
+                        self.translation.insert_tokens(normalized_tokens)
+                    else:
+                        self.translation.insert_tokens(tokens_to_process)
                     translation_validated_segments, buffer_translation = await asyncio.to_thread(self.translation.process)
                     async with self.lock:
-                        self.state.translation_validated_segments = translation_validated_segments
+                        existing = self.state.translation_validated_segments
+                        if not isinstance(existing, list):
+                            existing = [existing] if existing else []
+                        if translation_validated_segments and getattr(translation_validated_segments, "text", ""):
+                            existing.append(translation_validated_segments)
+                        # Keep memory bounded; UI only needs recent segments
+                        self.state.translation_validated_segments = existing[-200:]
                         self.state.buffer_translation = buffer_translation
+
+                    if flush_on_silence:
+                        flushed, empty = self.translation.validate_buffer_and_reset()
+                        if flushed and getattr(flushed, "text", ""):
+                            async with self.lock:
+                                existing = self.state.translation_validated_segments
+                                if not isinstance(existing, list):
+                                    existing = [existing] if existing else []
+                                existing.append(flushed)
+                                self.state.translation_validated_segments = existing[-200:]
+                                self.state.buffer_translation = empty
                 self.translation_queue.task_done()
                 for _ in additional_tokens:
                     self.translation_queue.task_done()
@@ -446,7 +517,7 @@ class AudioProcessor:
             except Exception as e:
                 logger.warning(f"Exception in translation_processor: {e}")
                 logger.warning(f"Traceback: {traceback.format_exc()}")
-                if 'token' in locals() and item is not SENTINEL:
+                if 'item' in locals() and item is not SENTINEL:
                     self.translation_queue.task_done()
                 if 'additional_tokens' in locals():
                     for _ in additional_tokens:

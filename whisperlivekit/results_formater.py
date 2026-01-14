@@ -57,6 +57,11 @@ def format_output(state, silence, args, sep):
     disable_punctuation_split = args.disable_punctuation_split
     tokens = state.tokens
     translation_validated_segments = state.translation_validated_segments # Here we will attribute the speakers only based on the timestamps of the segments
+    # Backwards/robustness: translation backend may provide a single TimedText instead of a list.
+    if translation_validated_segments is None:
+        translation_validated_segments = []
+    elif not isinstance(translation_validated_segments, (list, tuple)):
+        translation_validated_segments = [translation_validated_segments]
     last_validated_token = state.last_validated_token
     
     previous_speaker = 1
