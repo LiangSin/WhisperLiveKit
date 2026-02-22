@@ -96,12 +96,17 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                             stdout=asyncio.subprocess.PIPE,
                             stderr=asyncio.subprocess.DEVNULL
                         )
+                        i = 0
                         while True:
+                            i += 1
                             chunk = await process.stdout.read(4096)
                             if not chunk:
                                 break
                             await websocket.send(chunk)
-                            await asyncio.sleep(0.05)
+                            if debug:
+                                print(f"[DEBUG] Sent chunk {i} for group {group_id}")
+                            if i % 10000 == 0:
+                                await asyncio.sleep(0.05)
 
                     # Send End of Stream signal (Empty Bytes)
                     await websocket.send(b"")
@@ -114,6 +119,8 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                         try:
                             msg = await websocket.recv()
                             data = json.loads(msg)
+                            if debug:
+                                print(f"[DEBUG] Received message for group {group_id}: {data}")
                             if data.get("type") == "ready_to_stop":
                                 if debug:
                                     print(f"[DEBUG] Received ready_to_stop for group {group_id}")

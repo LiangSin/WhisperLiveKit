@@ -68,16 +68,16 @@ case "$preset" in
     ;;
   --youtube)
     preset_args=(
-      --dataset_path dataset/youtube_data
+      --dataset_path dataset/youtube_data/@NTUOCW
       --dataset_class YoutubeDataset
       --output benchmarking/results/youtube.json
     )
     ;;
   --youtube-debug)
     preset_args=(
-      --dataset_path dataset/youtube_data/debug
+      --dataset_path dataset/youtube_data/small
       --dataset_class YoutubeDataset
-      --output benchmarking/results/youtube-debug.json
+      --output benchmarking/results/youtube-small.json
     )
     ;;
 esac
