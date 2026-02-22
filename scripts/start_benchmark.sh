@@ -77,7 +77,7 @@ case "$preset" in
     preset_args=(
       --dataset_path dataset/youtube_data/small
       --dataset_class YoutubeDataset
-      --output benchmarking/results/youtube-small.json
+      --output benchmarking/results/youtube-small-ten-vad.json
     )
     ;;
 esac

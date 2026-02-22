@@ -35,6 +35,7 @@ class TranscriptionEngine:
             "target_language": "",
             "vac": True,
             "vac_onnx": False,
+            "vac_backend": "silero",
             "vac_chunk_size": 0.04,
             "log_level": "DEBUG",
             "ssl_certfile": None,
@@ -79,10 +80,17 @@ class TranscriptionEngine:
         self.vac_model = None
         
         if self.args.vac:
-            from whisperlivekit.silero_vad_iterator import load_silero_vad
-            # Use ONNX if specified, otherwise use JIT (default)
-            use_onnx = kwargs.get('vac_onnx', False)
-            self.vac_model = load_silero_vad(onnx=use_onnx)
+            vac_backend = self.args.vac_backend
+            if vac_backend == "ten-vad":
+                # TEN VAD creates its model internally per AudioProcessor instance;
+                # no shared model object is needed here.
+                self.vac_model = None
+                logger.info("VAC backend: TEN VAD")
+            else:
+                from whisperlivekit.silero_vad_iterator import load_silero_vad
+                use_onnx = kwargs.get('vac_onnx', False)
+                self.vac_model = load_silero_vad(onnx=use_onnx)
+                logger.info("VAC backend: Silero VAD (onnx=%s)", use_onnx)
         
         backend_policy = self.args.backend_policy
         if self.args.transcription:

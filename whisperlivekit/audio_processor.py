@@ -7,6 +7,7 @@ import traceback
 from whisperlivekit.timed_objects import ASRToken, Silence, Line, FrontData, State, Transcript, ChangeSpeaker
 from whisperlivekit.core import TranscriptionEngine, online_factory, online_diarization_factory, online_translation_factory
 from whisperlivekit.silero_vad_iterator import FixedVADIterator
+from whisperlivekit.ten_vad_iterator import TenVADIterator
 from whisperlivekit.results_formater import format_output
 from whisperlivekit.ffmpeg_manager import FFmpegManager, FFmpegState
 
@@ -89,7 +90,12 @@ class AudioProcessor:
         self.asr = models.asr
         self.vac_model = models.vac_model
         if self.args.vac:
-            self.vac = FixedVADIterator(models.vac_model)
+            vac_backend = getattr(self.args, 'vac_backend', 'silero')
+            if vac_backend == 'ten-vad':
+                logger.info("Use ten-vad")
+                self.vac = TenVADIterator()
+            else:
+                self.vac = FixedVADIterator(models.vac_model)
         else:
             self.vac = None
                          
