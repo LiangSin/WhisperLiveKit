@@ -37,6 +37,7 @@ class TranscriptionEngine:
             "vac_onnx": False,
             "vac_backend": "silero",
             "vac_chunk_size": 0.04,
+            "vad_threshold": 0.5,
             "log_level": "DEBUG",
             "ssl_certfile": None,
             "ssl_keyfile": None,
