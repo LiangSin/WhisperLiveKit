@@ -157,6 +157,13 @@ def parse_args():
         action="store_true",
         help="Disable VAD (voice activity detection).",
     )
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=0.5,
+        dest="vad_threshold",
+        help="VAD speech probability threshold (default: 0.5). Probabilities above this value are considered as speech.",
+    )
     
     parser.add_argument(
         "--buffer_trimming",

@@ -168,6 +168,18 @@ class SimulStreamingOnlineProcessor:
         except Exception as e:
             logger.exception(f"SimulStreaming warmup failed: {e}")
 
+    def force_refresh(self):
+        """Discard all pending state and force a complete context reset.
+
+        Called when a hallucination phrase is detected in the model output.
+        Clears the KV cache, attention matrices, and all buffered segments so
+        that the next inference starts from a clean slate.
+        """
+        if self.model is not None:
+            # self.model._clean_cache()
+            self.model.refresh_segment(complete=True)
+        # self.buffer = []
+
     def close(self):
         """Explicitly clean up resources."""
         if self.model is not None:

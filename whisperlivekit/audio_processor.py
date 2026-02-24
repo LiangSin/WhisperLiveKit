@@ -9,6 +9,7 @@ from whisperlivekit.core import TranscriptionEngine, online_factory, online_diar
 from whisperlivekit.silero_vad_iterator import FixedVADIterator
 from whisperlivekit.results_formater import format_output
 from whisperlivekit.ffmpeg_manager import FFmpegManager, FFmpegState
+from whisperlivekit.hallucination_filter import load_boh, contains_hallucination, TripleRepeatDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -85,11 +86,27 @@ class AudioProcessor:
             self.last_start = 0.0
             self.last_end = 0.0
         
+        # Hallucination filtering
+        self.boh_phrases = load_boh()
+        # Rolling text window: catches BoH phrases split across chunk boundaries.
+        # Window size = 3x the longest phrase (min 200 chars).
+        max_phrase_len = max((len(p) for p in self.boh_phrases), default=0)
+        self._boh_window_size = max(max_phrase_len * 3, 200)
+        self._boh_recent_text = ""
+        # Stateful rolling-hash detector for triple-repetition patterns.
+        # Fed only with new_text each call (O(|new_text|) vs O(window)).
+        self._repeat_detector = TripleRepeatDetector()
+        logger.info(
+            "[BoH] Hallucination filter: %s.",
+            f"active with {len(self.boh_phrases)} phrase(s), window={self._boh_window_size} chars"
+            if self.boh_phrases else "disabled",
+        )
+
         # Models and processing
         self.asr = models.asr
         self.vac_model = models.vac_model
         if self.args.vac:
-            self.vac = FixedVADIterator(models.vac_model)
+            self.vac = FixedVADIterator(models.vac_model, threshold=self.args.vad_threshold)
         else:
             self.vac = None
                          
@@ -293,6 +310,45 @@ class AudioProcessor:
 
                 _buffer_transcript = self.transcription.get_buffer()
                 buffer_text = _buffer_transcript.text
+
+                # Hallucination detection
+                # 1. recent-tokens window: Feed only new_text into the 
+                #    rolling-hash detector. Also catches BoH phrases 
+                #    split across consecutive process_iter() chunks.
+                # 2. buffer text: BoH phrase match only.
+                if self.boh_phrases:
+                    new_text = self.sep.join(t.text for t in new_tokens)
+                    self._boh_recent_text = (
+                        self._boh_recent_text + new_text
+                    )[-self._boh_window_size:]
+
+                    for check_text, label, det, nt in (
+                        (self._boh_recent_text, "recent tokens", self._repeat_detector, new_text),
+                        (buffer_text,           "buffer",        None,                  ""),
+                    ):
+                        is_hallucination, matched_phrase = contains_hallucination(
+                            check_text, self.boh_phrases,
+                            detector=det, new_text=nt,
+                        )
+                        if is_hallucination:
+                            logger.warning(
+                                "[BoH] HALLUCINATION DETECTED | source=%s | phrase=%r | text=%r",
+                                label,
+                                matched_phrase,
+                                check_text[:120],
+                            )
+                            self.transcription.force_refresh()
+                            self._boh_recent_text = ""
+                            self._repeat_detector.reset()
+                            logger.warning(
+                                "[BoH] Context force-refreshed. Discarding %d token(s).",
+                                len(new_tokens),
+                            )
+                            new_tokens = []
+                            _buffer_transcript = self.transcription.get_buffer()
+                            buffer_text = _buffer_transcript.text
+                            current_audio_processed_upto = self.state.end_buffer
+                            break
 
                 if new_tokens:
                     validated_text = self.sep.join([t.text for t in new_tokens])
