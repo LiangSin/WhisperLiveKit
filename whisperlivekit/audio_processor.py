@@ -9,7 +9,7 @@ from whisperlivekit.core import TranscriptionEngine, online_factory, online_diar
 from whisperlivekit.silero_vad_iterator import FixedVADIterator
 from whisperlivekit.results_formater import format_output
 from whisperlivekit.ffmpeg_manager import FFmpegManager, FFmpegState
-from whisperlivekit.hallucination_filter import load_boh, contains_hallucination, TripleRepeatDetector
+from whisperlivekit.hallucination_filter import load_boh, contains_hallucination, LoopingDetector
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -95,7 +95,7 @@ class AudioProcessor:
         self._boh_recent_text = ""
         # Stateful rolling-hash detector for triple-repetition patterns.
         # Fed only with new_text each call (O(|new_text|) vs O(window)).
-        self._repeat_detector = TripleRepeatDetector()
+        self._repeat_detector = LoopingDetector()
         logger.info(
             "[BoH] Hallucination filter: %s.",
             f"active with {len(self.boh_phrases)} phrase(s), window={self._boh_window_size} chars"
