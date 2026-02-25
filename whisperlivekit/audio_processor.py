@@ -110,9 +110,9 @@ class AudioProcessor:
             vac_backend = getattr(self.args, 'vac_backend', 'silero')
             if vac_backend == 'ten-vad':
                 logger.info("Use ten-vad")
-                self.vac = TenVADIterator()
+                self.vac = TenVADIterator(threshold=self.args.vad_threshold)
             else:
-                self.vac = FixedVADIterator(models.vac_model)
+                self.vac = FixedVADIterator(models.vac_model, threshold=self.args.vad_threshold)
         else:
             self.vac = None
                          
