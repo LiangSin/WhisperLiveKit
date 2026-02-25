@@ -107,10 +107,22 @@ class FFmpegManager:
             self.state = FFmpegState.STOPPED
 
         if self.process:
-            if self.process.stdin and not self.process.stdin.is_closing():
-                self.process.stdin.close()
-                await self.process.stdin.wait_closed()
-            await self.process.wait()
+            # Terminate first: once the state is STOPPED, ffmpeg_stdout_reader stops draining stdout. 
+            try:
+                self.process.terminate()
+            except ProcessLookupError:
+                pass
+
+            try:
+                await asyncio.wait_for(self.process.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("FFmpeg did not exit after SIGTERM, sending SIGKILL.")
+                try:
+                    self.process.kill()
+                except ProcessLookupError:
+                    pass
+                await self.process.wait()
+
             self.process = None
 
         if self._stderr_task:

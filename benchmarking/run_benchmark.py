@@ -143,6 +143,7 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     for t in (send_task, recv_task):
                         if not t.done():
                             t.cancel()
+                    await asyncio.gather(send_task, recv_task, return_exceptions=True)
 
                 hyp = final_transcript_for_chapter.strip()
                 # Concatenate references
@@ -173,6 +174,8 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                 "id": group_id,
                 "error": str(e)
             })
+        finally:
+            await asyncio.sleep(1)
 
     if count > 0:
         avg_error_ratio = total_error_ratio / count
