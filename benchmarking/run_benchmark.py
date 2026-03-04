@@ -12,7 +12,7 @@ import struct
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import DatasetClass
 
-async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False):
+async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False):
     print(f"Loading dataset from {dataset_path} using class {dataset_class_name}...")
     
     try:
@@ -21,7 +21,7 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
         print(f"Error: Dataset class '{dataset_class_name}' not found in DatasetClass/")
         sys.exit(1)
         
-    dataset_instance = DSClass(dataset_path)
+    dataset_instance = DSClass(dataset_path, translate=translate)
     print(f"Found {len(dataset_instance)} samples.")
     
     if len(dataset_instance) == 0:
@@ -31,6 +31,19 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
     results = []
     total_error_ratio = 0.0
     count = 0
+
+    if translate:
+        output_dir = os.path.dirname(output_file)
+        output_stem = os.path.splitext(os.path.basename(output_file))[0]
+        translate_dir = os.path.join(output_dir, "translate") if output_dir else "translate"
+        os.makedirs(translate_dir, exist_ok=True)
+        translate_file = os.path.join(translate_dir, output_stem + ".txt")
+        translate_answer_file = os.path.join(translate_dir, output_stem + ".answer.txt")
+        translate_out = open(translate_file, "w", encoding="utf-8")
+        translate_answer_out = open(translate_answer_file, "w", encoding="utf-8")
+    else:
+        translate_out = None
+        translate_answer_out = None
     
     print(f"Starting benchmark against {websocket_url}...")
     
@@ -76,15 +89,19 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
 
                 # State variable to track transcript for the whole chapter
                 final_transcript_for_chapter = ""
+                final_translation_lines = []
 
                 def update_transcript(msg_data):
-                    nonlocal final_transcript_for_chapter
+                    nonlocal final_transcript_for_chapter, final_translation_lines
                     if "lines" in msg_data:
                         lines = msg_data["lines"]
                         text_parts = [l.get("text", "") for l in lines if l.get("text")]
                         current_text = " ".join(text_parts)
                         if current_text:
                             final_transcript_for_chapter = current_text
+                        translation_parts = [l.get("translation", "").strip() for l in lines if l.get("translation", "").strip()]
+                        if translate and translation_parts:
+                            final_translation_lines = translation_parts
 
                 async def send_audio():
                     """Stream audio chunks to the websocket."""
@@ -145,6 +162,20 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                             t.cancel()
                     await asyncio.gather(send_task, recv_task, return_exceptions=True)
 
+                if translate and translate_out is not None:
+                    for tline in final_translation_lines:
+                        translate_out.write(tline + " ")
+                    translate_out.write("\n")
+                    translate_out.flush()
+
+                # Write COMET reference to translate_answer_out
+                if translate and translate_answer_out is not None:
+                    for sample in chapter_samples:
+                        trans_result = sample.get('translation')
+                        if trans_result:
+                            translate_answer_out.write(trans_result + "\n")
+                    translate_answer_out.flush()
+
                 hyp = final_transcript_for_chapter.strip()
                 # Concatenate references
                 ref = " ".join([s['text'] for s in chapter_samples])
@@ -184,6 +215,13 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
     else:
         print("\nBenchmark complete. No samples processed successfully.")
 
+    if translate_out is not None:
+        translate_out.close()
+        print(f"Translation results saved to {translate_file}")
+    if translate_answer_out is not None:
+        translate_answer_out.close()
+        print(f"Translation answer (COMET reference) saved to {translate_answer_file}")
+
     # Save results
     try:
         output_dir = os.path.dirname(output_file)
@@ -203,8 +241,9 @@ if __name__ == "__main__":
     parser.add_argument("--url", default="ws://localhost:8000/asr", help="WebSocket URL of the running server")
     parser.add_argument("--output", default="benchmark_results.json", help="Output file for results")
     parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
+    parser.add_argument("--translate", action="store_true", help="Collect translation output from the server and save to a separate file")
     args = parser.parse_args()
     
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate))

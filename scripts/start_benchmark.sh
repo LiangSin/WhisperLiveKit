@@ -10,7 +10,7 @@ usage() {
 Usage: scripts/run_benchmark_preset.sh --<preset> [additional args...]
 
 Presets:
-  --libri, --libri-debug, --youtube, --youtube-debug
+  --libri, --libri-debug, --youtube, --youtube-debug, --translate, --translate-debug
 
 Any extra arguments after the preset flag are forwarded to benchmarking/run_benchmark.py.
 EOF
@@ -26,7 +26,7 @@ extra_args=()
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --libri|--libri-debug|--youtube|--youtube-debug)
+    --libri|--libri-debug|--youtube|--youtube-debug|--translate|--translate-debug)
       if [[ -n "$preset" ]]; then
         echo "Multiple presets specified. Choose only one." >&2
         usage
@@ -78,6 +78,22 @@ case "$preset" in
       --dataset_path dataset/youtube_data/debug/@NTUOCW
       --dataset_class YoutubeDataset
       --output benchmarking/results/youtube-small-ten-vad.json
+    )
+    ;;
+  --translate)
+    preset_args=(
+      --translate
+      --dataset_path dataset/youtube_data/debug/@NTUOCW/PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK
+      --dataset_class YoutubeDataset
+      --output benchmarking/results/translate-debug.json
+    )
+    ;;
+  --translate-debug)
+    preset_args=(
+      --translate
+      --dataset_path dataset/youtube_data/debug/@NTUOCW/PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK/test1
+      --dataset_class YoutubeDataset
+      --output benchmarking/results/translate-debug.json
     )
     ;;
 esac

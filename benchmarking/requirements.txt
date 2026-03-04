@@ -2,4 +2,6 @@ websockets
 jiwer
 tqdm
 numpy
+sacrebleu
+unbabel-comet
 

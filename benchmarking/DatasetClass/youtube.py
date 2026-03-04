@@ -5,8 +5,9 @@ import jiwer
 from .base import BaseDataset
 
 class YoutubeDataset(BaseDataset):
-    def __init__(self, root_dir):
+    def __init__(self, root_dir, translate=False):
         super().__init__(root_dir)
+        self.translate = translate
         self._scan()
 
     def _scan(self):
@@ -27,17 +28,24 @@ class YoutubeDataset(BaseDataset):
                     # Skip if no srt file is found
                     continue
                 
-                # Prioritize 'zh' in filename
+                # Prioritize 'zh' then 'en' in filename
                 def sort_key(filename):
                     # Lower value means higher priority
-                    if 'zh' in filename.lower():
+                    name_lower = filename.lower()
+                    if 'zh' in name_lower:
                         return 0
-                    return 1
+                    if 'en' in name_lower:
+                        return 1
+                    return 2
                 
                 candidates.sort(key=sort_key)
                 srt_file = candidates[0]
                 srt_path = os.path.join(root, srt_file)
                 audio_path = os.path.join(root, audio_file)
+                
+                trans_path = None
+                if len(candidates) > 1 and self.translate:
+                    trans_path = os.path.join(root, candidates[1])
                 
                 try:
                     text = self._parse_srt(srt_path)
@@ -47,6 +55,8 @@ class YoutubeDataset(BaseDataset):
                             'audio_path': audio_path,
                             'text': text
                         }
+                        if trans_path is not None:
+                            sample['translation'] = self._parse_srt(trans_path)
                         # Each video is one chapter
                         self.samples.append([sample])
                 except Exception as e:
