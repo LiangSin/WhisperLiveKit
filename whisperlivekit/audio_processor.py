@@ -258,10 +258,6 @@ class AudioProcessor:
         logger.info("FFmpeg stdout processing finished. Signaling downstream processors if needed.")
         if not self.diarization_before_transcription and self.transcription_queue:
             await self.transcription_queue.put(SENTINEL)
-        if self.diarization:
-            await self.diarization_queue.put(SENTINEL)
-        if self.translation:
-            await self.translation_queue.put(SENTINEL)
 
     async def transcription_processor(self):
         """Process audio chunks for transcription."""
@@ -390,10 +386,10 @@ class AudioProcessor:
         
         if self.is_stopping:
             logger.info("Transcription processor finishing due to stopping flag.")
-            if self.diarization_queue:
-                await self.diarization_queue.put(SENTINEL)
-            if self.translation_queue:
-                await self.translation_queue.put(SENTINEL)
+        if self.diarization_queue:
+            await self.diarization_queue.put(SENTINEL)
+        if self.translation_queue:
+            await self.translation_queue.put(SENTINEL)
 
         logger.info("Transcription processor task finished.")
 
@@ -481,12 +477,29 @@ class AudioProcessor:
         except Exception:
             NLLWTimedText = None
 
+        async def _flush_translation_buffer():
+            """Flush any remaining tokens from the NLLW buffer into validated segments."""
+            try:
+                flushed, empty = self.translation.validate_buffer_and_reset()
+                if flushed and getattr(flushed, "text", ""):
+                    logger.debug("Translation processor: flushed remaining buffer on sentinel: %r", flushed.text[:80])
+                    async with self.lock:
+                        existing = self.state.translation_validated_segments
+                        if not isinstance(existing, list):
+                            existing = [existing] if existing else []
+                        existing.append(flushed)
+                        self.state.translation_validated_segments = existing[-200:]
+                        self.state.buffer_translation = empty
+            except Exception as e:
+                logger.warning("Exception while flushing translation buffer on sentinel: %s", e)
+
         while True:
             try:
                 item = await self.translation_queue.get() #block until at least 1 token
                 if item is SENTINEL:
                     logger.debug("Translation processor received sentinel. Finishing.")
                     self.translation_queue.task_done()
+                    await _flush_translation_buffer()
                     break
                 elif isinstance(item, Silence):
                     # Never forward Silence objects into NLLW buffers; its backend expects tokens with `.text`.
@@ -574,6 +587,7 @@ class AudioProcessor:
                 
                 if sentinel_found:
                     logger.debug("Translation processor received sentinel in batch. Finishing.")
+                    await _flush_translation_buffer()
                     break
                 
             except Exception as e:
