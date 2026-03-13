@@ -49,6 +49,7 @@ class TranscriptionEngine:
             "diarization_backend": "sortformer",
             "backend_policy": "simulstreaming",
             "backend": "auto",
+            "sentence_detection": False,
         }
         global_params = update_with_kwargs(global_params, kwargs)
 
@@ -173,6 +174,22 @@ class TranscriptionEngine:
                 }
                 translation_params = update_with_kwargs(translation_params, kwargs)
                 self.translation_model = load_model([self.args.lan], **translation_params) #in the future we want to handle different languages for different speakers
+        self.sat_model = None
+        need_sat = self.args.sentence_detection
+        if need_sat:
+            try:
+                import torch
+                from wtpsplit import SaT
+                device = "cuda" if torch.cuda.is_available() else "cpu"
+                sat = SaT("sat-3l-sm")
+                sat.half().to(device)
+                self.sat_model = sat
+                logger.info("SaT sentence-detection model loaded on %s", device)
+            except ImportError:
+                raise Exception(
+                    "wtpsplit is required for sentence detection / TranslateGemma. "
+                    "Install it with: pip install wtpsplit"
+                )
         TranscriptionEngine._initialized = True
 
 

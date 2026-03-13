@@ -332,6 +332,19 @@ def parse_args():
         help="Optional. Number of models to preload in memory to speed up loading (set up to the expected number of concurrent instances).",
     )
 
+    parser.add_argument(
+        "--sentence-detection",
+        action="store_true",
+        default=False,
+        dest="sentence_detection",
+        help=(
+            "Enable SaT-based sentence boundary detection on validated transcription tokens. "
+            "Detected sentences are sent to connected clients as a 'sentences' field "
+            "(list of {text, start, end} objects). "
+            "Automatically enabled when --translation-model translategemma is used. "
+        ),
+    )
+
     simulstreaming_group.add_argument(
         "--nllb-backend",
         type=str,

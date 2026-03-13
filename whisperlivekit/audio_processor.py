@@ -130,20 +130,25 @@ class AudioProcessor:
                 self._ffmpeg_error = error_type
             self.ffmpeg_manager.on_error_callback = handle_ffmpeg_error
              
+        use_sentence_detection = getattr(self.args, "sentence_detection", False)
+
         self.transcription_queue = asyncio.Queue() if self.args.transcription else None
         self.diarization_queue = asyncio.Queue() if self.args.diarization else None
         self.translation_queue = asyncio.Queue() if self.args.target_language else None
+        self.sat_queue = asyncio.Queue() if use_sentence_detection else None
         self.pcm_buffer = bytearray()
 
         self.transcription_task = None
         self.diarization_task = None
         self.translation_task = None
+        self.sentence_task = None
         self.watchdog_task = None
         self.all_tasks_for_cleanup = []
         
         self.transcription = None
         self.translation = None
         self.diarization = None
+        self.sentence_detector = None
 
         if self.args.transcription:
             self.transcription = online_factory(self.args, models.asr)        
@@ -153,6 +158,22 @@ class AudioProcessor:
         if models.translation_model:
             self.translation = online_translation_factory(self.args, models.translation_model)
 
+        if use_sentence_detection and models.sat_model is not None:
+            from whisperlivekit.sentence_detector import (
+                StreamingSentenceDetector,
+                SentenceDetectionProcessor,
+            )
+            self.sentence_detector = StreamingSentenceDetector(sat_model=models.sat_model)
+            self._sentence_proc = SentenceDetectionProcessor(
+                detector=self.sentence_detector,
+                sat_queue=self.sat_queue,
+                state=self.state,
+                lock=self.lock,
+                sentinel=SENTINEL,
+            )
+        else:
+            self._sentence_proc = None
+
     async def _push_silence_event(self, silence_buffer: Silence):
         if not self.diarization_before_transcription and self.transcription_queue:
             await self.transcription_queue.put(silence_buffer)
@@ -160,6 +181,8 @@ class AudioProcessor:
             await self.diarization_queue.put(silence_buffer)
         if self.translation_queue:
             await self.translation_queue.put(silence_buffer)
+        if self.sat_queue:
+            await self.sat_queue.put(silence_buffer)
 
     async def _begin_silence(self):
         if self.silence:
@@ -375,7 +398,10 @@ class AudioProcessor:
                 if self.translation_queue:
                     for token in new_tokens:
                         await self.translation_queue.put(token)
-                        
+
+                if self.sat_queue and new_tokens:
+                    await self.sat_queue.put(list(new_tokens))
+
                 self.transcription_queue.task_done()
                 
             except Exception as e:
@@ -390,6 +416,8 @@ class AudioProcessor:
             await self.diarization_queue.put(SENTINEL)
         if self.translation_queue:
             await self.translation_queue.put(SENTINEL)
+        if self.sat_queue:
+            await self.sat_queue.put(SENTINEL)
 
         logger.info("Transcription processor task finished.")
 
@@ -600,6 +628,10 @@ class AudioProcessor:
                         self.translation_queue.task_done()
         logger.info("Translation processor task finished.")
 
+    async def sentence_processor(self):
+        """Delegate to :class:`~whisperlivekit.sentence_detector.SentenceDetectionProcessor`."""
+        await self._sentence_proc.run()
+
     async def results_formatter(self):
         """Format processing results for output."""
         while True:
@@ -612,12 +644,16 @@ class AudioProcessor:
 
                 state = await self.get_current_state()
                 
-                lines, undiarized_text = format_output(
-                    state,
-                    self.silence,
-                    args = self.args,
-                    sep=self.sep
-                )
+                if self.sentence_detector:
+                    from whisperlivekit.sentence_detector import format_sentence_lines
+                    lines, undiarized_text = format_sentence_lines(state, self.args)
+                else:
+                    lines, undiarized_text = format_output(
+                        state,
+                        self.silence,
+                        args=self.args,
+                        sep=self.sep,
+                    )
                 if lines and lines[-1].speaker == -2:
                     buffer_transcription = Transcript()
                 else:
@@ -716,7 +752,12 @@ class AudioProcessor:
             self.translation_task = asyncio.create_task(self.translation_processor())
             self.all_tasks_for_cleanup.append(self.translation_task)
             processing_tasks_for_watchdog.append(self.translation_task)
-        
+
+        if self.sentence_detector:
+            self.sentence_task = asyncio.create_task(self.sentence_processor())
+            self.all_tasks_for_cleanup.append(self.sentence_task)
+            processing_tasks_for_watchdog.append(self.sentence_task)
+
         # Monitor overall system health
         self.watchdog_task = asyncio.create_task(self.watchdog(processing_tasks_for_watchdog))
         self.all_tasks_for_cleanup.append(self.watchdog_task)
@@ -783,6 +824,7 @@ class AudioProcessor:
             self.transcription_task,
             self.diarization_task,
             self.translation_task,
+            self.sentence_task,
             self.ffmpeg_reader_task,
         ]
         return all(task.done() for task in tasks_to_check if task)
