@@ -47,7 +47,7 @@ info "Installing benchmarking dependencies..."
 pip install -r benchmarking/requirements.txt
 
 info "Installing additional dependencies..."
-pip install safetensors faster_whisper huggingface_hub yt-dlp nllw ten-vad wtpsplit
+pip install safetensors faster_whisper huggingface_hub yt-dlp nllw ten-vad wtpsplit pillow
 
 info "Checking for ffmpeg..."
 if ! command -v ffmpeg >/dev/null 2>&1; then

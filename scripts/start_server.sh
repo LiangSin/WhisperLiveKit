@@ -7,13 +7,20 @@ cd "$REPO_ROOT"
 
 usage() {
   cat <<'EOF'
-Usage: scripts/start_server.sh --cuda <id> --model <model_path>
+Usage: scripts/start_server.sh --cuda <id>
 
 Required arguments:
   --cuda      GPU id for CUDA_VISIBLE_DEVICES
-  --model     Model path to pass to whisperlivekit-server
 
 Optional arguments:
+  --model     Model path to pass to whisperlivekit-server (default: models/cool-whisper)
+  --vac       VAC backend to use: 'silero' (default, requires torch + model files) or 'ten-vad' (default: ten-vad).
+  --lang      Source language code, e.g. en,de,cs, or 'auto' for language detection (default: zh).
+  --target-lang     Target language for translation.
+  --translation-model  Translation model: 'nllw' (default) or 'translategemma'.
+  --translation-model-size  Model size string, e.g. '600M'/'1.3B' for nllw, '4b'/'12b'/'27b' for translategemma.
+  --sentence-detection  Enable SaT sentence boundary detection (requires pip install wtpsplit).
+                        Automatically enabled when --translation-model translategemma is used.
   --bind      Bind host address
   --allowed-ips <ips>           Comma-separated list of allowed IP addresses
                                 Example: "192.168.1.100,10.0.0.50"
@@ -28,6 +35,12 @@ model_path=""
 allowed_ips=""
 allowed_networks=""
 bind_host=""
+vac_backend=""
+language=""
+target_language=""
+translation_model=""
+translation_model_size=""
+sentence_detection=0
 passthrough_args=()
 
 while [[ $# -gt 0 ]]; do
@@ -57,6 +70,34 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || usage
       bind_host="$1"
       ;;
+    --vac)
+      shift
+      [[ $# -gt 0 ]] || usage
+      vac_backend="$1"
+      ;;
+    --lang)
+      shift
+      [[ $# -gt 0 ]] || usage
+      language="$1"
+      ;;
+    --target-lang)
+      shift
+      [[ $# -gt 0 ]] || usage
+      target_language="$1"
+      ;;
+    --translation-model)
+      shift
+      [[ $# -gt 0 ]] || usage
+      translation_model="$1"
+      ;;
+    --translation-model-size)
+      shift
+      [[ $# -gt 0 ]] || usage
+      translation_model_size="$1"
+      ;;
+    --sentence-detection)
+      sentence_detection=1
+      ;;
     *)
       # Unknown args should be passed through to whisperlivekit-server
       passthrough_args+=("$1")
@@ -66,13 +107,47 @@ while [[ $# -gt 0 ]]; do
 done
 
 [[ -n "$cuda_id" ]] || usage
-[[ -n "$model_path" ]] || usage
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$cuda_id"
 echo "CUDA_VISIBLE_DEVICES set to $CUDA_VISIBLE_DEVICES"
 
-cmd_args=(--model-path $model_path)
+cmd_args=()
+
+if [[ -n "$model_path" ]]; then
+  cmd_args+=(--model-path $model_path)
+else
+  cmd_args+=(--model-path models/cool-whisper)
+fi
+
+if [[ -n "$vac_backend" ]]; then
+  cmd_args+=(--vac-backend $vac_backend)
+else
+  cmd_args+=(--vac-backend ten-vad)
+fi
+
+if [[ -n "$language" ]]; then
+  cmd_args+=(--language $language)
+else
+  cmd_args+=(--language zh)
+fi
+
+if [[ -n "$target_language" ]]; then
+  cmd_args+=(--target-language $target_language)
+fi
+
+if [[ -n "$translation_model" ]]; then
+  cmd_args+=(--translation-model $translation_model)
+fi
+
+if [[ -n "$translation_model_size" ]]; then
+  cmd_args+=(--translation-model-size $translation_model_size)
+fi
+
+if [[ "$sentence_detection" -eq 1 ]]; then
+  cmd_args+=(--sentence-detection)
+fi
+
 if [[ -n "$allowed_ips" ]]; then
   cmd_args+=(--allowed-ips $allowed_ips)
 fi
