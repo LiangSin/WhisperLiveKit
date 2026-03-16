@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
 SENTINEL = object() # unique sentinel object for end of stream marker
+HALLUCINATION_RESET = object()  # signals SaT/Gemma to clear state when hallucination detected
 
 def cut_at(cumulative_pcm, cut_sec):
     cumulative_len = 0
@@ -170,6 +171,7 @@ class AudioProcessor:
                 state=self.state,
                 lock=self.lock,
                 sentinel=SENTINEL,
+                hallucination_reset=HALLUCINATION_RESET,
             )
         else:
             self._sentence_proc = None
@@ -373,6 +375,8 @@ class AudioProcessor:
                             _buffer_transcript = self.transcription.get_buffer()
                             buffer_text = _buffer_transcript.text
                             current_audio_processed_upto = self.state.end_buffer
+                            if self.sat_queue:
+                                await self.sat_queue.put(HALLUCINATION_RESET)
                             break
 
                 if new_tokens:

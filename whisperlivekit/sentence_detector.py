@@ -81,6 +81,13 @@ class StreamingSentenceDetector:
         self.pending_tokens = []
         return sentence
 
+    def reset(self) -> None:
+        """
+        Clear pending tokens. Call when hallucination is detected so SaT
+        does not build on invalid text.
+        """
+        self.pending_tokens.clear()
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -153,6 +160,9 @@ class SentenceDetectionProcessor:
     sentinel:
         The sentinel object that signals end-of-stream (same one used by the
         audio processor so identity comparison works correctly).
+    hallucination_reset:
+        Object that signals hallucination detected upstream; clears SaT and
+        Gemma state. Identity-compared.
     """
 
     def __init__(
@@ -162,12 +172,14 @@ class SentenceDetectionProcessor:
         state,
         lock: asyncio.Lock,
         sentinel: object,
+        hallucination_reset: Optional[object] = None,
     ):
         self.detector = detector
         self.sat_queue = sat_queue
         self.state = state
         self.lock = lock
         self.sentinel = sentinel
+        self.hallucination_reset = hallucination_reset
 
     async def run(self):
         """Main processing loop — run as an ``asyncio.Task``."""
@@ -184,6 +196,12 @@ class SentenceDetectionProcessor:
                         self.state.sentence_pending = None
                     self.sat_queue.task_done()
                     break
+
+                elif self.hallucination_reset is not None and item is self.hallucination_reset:
+                    self.detector.reset()
+                    async with self.lock:
+                        self.state.sentence_pending = None
+                    self.sat_queue.task_done()
 
                 elif isinstance(item, Silence):
                     if item.has_ended and item.duration > 5:
