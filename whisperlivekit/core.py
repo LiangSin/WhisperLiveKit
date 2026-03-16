@@ -49,6 +49,7 @@ class TranscriptionEngine:
             "diarization_backend": "sortformer",
             "backend_policy": "simulstreaming",
             "backend": "auto",
+            "translation_model": "nllw",
             "sentence_detection": False,
         }
         global_params = update_with_kwargs(global_params, kwargs)
@@ -163,17 +164,34 @@ class TranscriptionEngine:
         if self.args.target_language:
             if self.args.lan == 'auto' and backend_policy != "simulstreaming":
                 raise Exception('Translation cannot be set with language auto when transcription backend is not simulstreaming')
-            else:
+            elif self.args.translation_model == "nllw":
                 try:
                     from nllw import load_model
                 except:
                     raise Exception('To use translation, you must install nllw: `pip install nllw`')
                 translation_params = { 
                     "nllb_backend": "transformers",
-                    "nllb_size": "600M"
+                    "translation_model_size": "600M"
                 }
                 translation_params = update_with_kwargs(translation_params, kwargs)
-                self.translation_model = load_model([self.args.lan], **translation_params) #in the future we want to handle different languages for different speakers
+                self.translation_model = load_model(
+                    [self.args.lan], 
+                    nllb_backend=translation_params["nllb_backend"],
+                    nllb_size=translation_params["translation_model_size"]
+                )
+            else:
+                try:
+                    from whisperlivekit.translategemma import TranslateGemmaModel
+                except:
+                    raise Exception('TranslateGemma is not supported.')
+                translation_params = {"translation_model_size": "4b"}
+                translation_params = update_with_kwargs(translation_params, kwargs)
+                self.translation_model = TranslateGemmaModel(
+                    model_size=translation_params["translation_model_size"],
+                    src_lang=self.args.lan,
+                    tgt_lang=self.args.target_language
+                )
+
         self.sat_model = None
         need_sat = self.args.sentence_detection
         if need_sat:

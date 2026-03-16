@@ -145,7 +145,8 @@ class StreamingSentenceDetector:
 
 class SentenceDetectionProcessor:
     """
-    Consumes items from ``sat_queue``. Completed sentences are stored in ``state.sentence_segments``.
+    Consumes items from ``sat_queue``. Completed sentences are stored in ``state.sentence_segments`` and
+    optionally forwarded to ``translation_sentence_queue`` for offline translation.
 
     Parameters
     ----------
@@ -160,9 +161,10 @@ class SentenceDetectionProcessor:
     sentinel:
         The sentinel object that signals end-of-stream (same one used by the
         audio processor so identity comparison works correctly).
+    translation_sentence_queue:
+        Optional queue to forward sentences for offline translation.
     hallucination_reset:
-        Object that signals hallucination detected upstream; clears SaT and
-        Gemma state. Identity-compared.
+        Object that signals hallucination detected upstream; clears state. 
     """
 
     def __init__(
@@ -172,6 +174,7 @@ class SentenceDetectionProcessor:
         state,
         lock: asyncio.Lock,
         sentinel: object,
+        translation_sentence_queue: Optional[asyncio.Queue] = None,
         hallucination_reset: Optional[object] = None,
     ):
         self.detector = detector
@@ -179,6 +182,7 @@ class SentenceDetectionProcessor:
         self.state = state
         self.lock = lock
         self.sentinel = sentinel
+        self.translation_sentence_queue = translation_sentence_queue
         self.hallucination_reset = hallucination_reset
 
     async def run(self):
@@ -194,6 +198,10 @@ class SentenceDetectionProcessor:
                         if sentence:
                             self.state.sentence_segments.append(sentence)
                         self.state.sentence_pending = None
+                    if self.translation_sentence_queue:
+                        if sentence:
+                            await self.translation_sentence_queue.put((sentence, False))
+                        await self.translation_sentence_queue.put(self.sentinel)
                     self.sat_queue.task_done()
                     break
 
@@ -211,6 +219,8 @@ class SentenceDetectionProcessor:
                             if sentence:
                                 self.state.sentence_segments.append(sentence)
                             self.state.sentence_pending = None
+                        if sentence and self.translation_sentence_queue:
+                            await self.translation_sentence_queue.put((sentence, False))
                     self.sat_queue.task_done()
 
                 elif isinstance(item, list):
@@ -221,6 +231,10 @@ class SentenceDetectionProcessor:
                             if sentence:
                                 self.state.sentence_segments.append(sentence)
                         self.state.sentence_pending = sentences[-1] if sentences and sentences[-1] else None
+                    if self.translation_sentence_queue:
+                        for sentence in sentences[:-1]:
+                            if sentence:
+                                await self.translation_sentence_queue.put((sentence, False))
                     self.sat_queue.task_done()
 
                 else:
@@ -303,6 +317,17 @@ def format_sentence_lines(state, args):
                     else:
                         remaining.append(ts)
                 unassigned = remaining
+
+    # if lines and translation_segs:
+    #     latest_transcription_end = lines[-1].end
+    #     latest_translation_end = translation_segs[-1].end
+    #     translation_delay = latest_transcription_end - latest_translation_end
+    #     logger.debug(
+    #         "Translation delay: %.2fs (transcription end=%.2f, translation end=%.2f)",
+    #         translation_delay,
+    #         latest_transcription_end,
+    #         latest_translation_end,
+    #     )
 
     return lines, []
 

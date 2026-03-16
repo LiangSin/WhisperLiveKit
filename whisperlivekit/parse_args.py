@@ -332,6 +332,14 @@ def parse_args():
         help="Optional. Number of models to preload in memory to speed up loading (set up to the expected number of concurrent instances).",
     )
 
+    simulstreaming_group.add_argument(
+        "--translation-model",
+        type=str,
+        default="nllw",
+        choices=["nllw", "translategemma"],
+        help="Translation model: nllw or translategemma.",
+    )
+
     parser.add_argument(
         "--sentence-detection",
         action="store_true",
@@ -353,10 +361,10 @@ def parse_args():
     )
     
     simulstreaming_group.add_argument(
-        "--nllb-size",
+        "--translation-model-size",
         type=str,
         default="600M",
-        help="600M or 1.3B",
+        help="600M or 1.3B for nllw. 4B, 12B or 27B for translategemma.",
     )
 
     args = parser.parse_args()

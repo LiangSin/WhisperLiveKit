@@ -131,7 +131,12 @@ class AudioProcessor:
                 self._ffmpeg_error = error_type
             self.ffmpeg_manager.on_error_callback = handle_ffmpeg_error
              
-        use_sentence_detection = getattr(self.args, "sentence_detection", False)
+        # Determine which optional pipeline stages are needed
+        self.use_offline_translation = (
+            bool(self.args.target_language)
+            and getattr(self.args, "translation_model", "nllw") != "nllw"
+        )
+        use_sentence_detection = getattr(self.args, "sentence_detection", False) or self.use_offline_translation
 
         self.transcription_queue = asyncio.Queue() if self.args.transcription else None
         self.diarization_queue = asyncio.Queue() if self.args.diarization else None
@@ -157,7 +162,17 @@ class AudioProcessor:
         if self.args.diarization:
             self.diarization = online_diarization_factory(self.args, models.diarization_model)
         if models.translation_model:
-            self.translation = online_translation_factory(self.args, models.translation_model)
+            if self.args.translation_model == "translategemma":
+                from whisperlivekit.translategemma import GemmaTranslationProcessor
+                self.translation = GemmaTranslationProcessor(
+                    gemma_model=models.translation_model,
+                    translation_sentence_queue=self.translation_queue,
+                    state=self.state,
+                    lock=self.lock,
+                    sentinel=SENTINEL,
+                )
+            else:
+                self.translation = online_translation_factory(self.args, models.translation_model)
 
         if use_sentence_detection and models.sat_model is not None:
             from whisperlivekit.sentence_detector import (
@@ -165,14 +180,25 @@ class AudioProcessor:
                 SentenceDetectionProcessor,
             )
             self.sentence_detector = StreamingSentenceDetector(sat_model=models.sat_model)
-            self._sentence_proc = SentenceDetectionProcessor(
-                detector=self.sentence_detector,
-                sat_queue=self.sat_queue,
-                state=self.state,
-                lock=self.lock,
-                sentinel=SENTINEL,
-                hallucination_reset=HALLUCINATION_RESET,
-            )
+            if self.use_offline_translation:
+                self._sentence_proc = SentenceDetectionProcessor(
+                    detector=self.sentence_detector,
+                    sat_queue=self.sat_queue,
+                    state=self.state,
+                    lock=self.lock,
+                    sentinel=SENTINEL,
+                    translation_sentence_queue=self.translation_queue,
+                    hallucination_reset=HALLUCINATION_RESET,
+                )
+            else:
+                self._sentence_proc = SentenceDetectionProcessor(
+                    detector=self.sentence_detector,
+                    sat_queue=self.sat_queue,
+                    state=self.state,
+                    lock=self.lock,
+                    sentinel=SENTINEL,
+                    hallucination_reset=HALLUCINATION_RESET,
+                )
         else:
             self._sentence_proc = None
 
@@ -181,7 +207,7 @@ class AudioProcessor:
             await self.transcription_queue.put(silence_buffer)
         if self.args.diarization and self.diarization_queue:
             await self.diarization_queue.put(silence_buffer)
-        if self.translation_queue:
+        if self.translation_queue and not self.use_offline_translation:
             await self.translation_queue.put(silence_buffer)
         if self.sat_queue:
             await self.sat_queue.put(silence_buffer)
@@ -399,7 +425,7 @@ class AudioProcessor:
                     self.state.buffer_transcription = _buffer_transcript
                     self.state.end_buffer = max(candidate_end_times)
                 
-                if self.translation_queue:
+                if self.translation_queue and not self.use_offline_translation:
                     for token in new_tokens:
                         await self.translation_queue.put(token)
 
@@ -418,7 +444,7 @@ class AudioProcessor:
             logger.info("Transcription processor finishing due to stopping flag.")
         if self.diarization_queue:
             await self.diarization_queue.put(SENTINEL)
-        if self.translation_queue:
+        if self.translation_queue and not self.use_offline_translation:
             await self.translation_queue.put(SENTINEL)
         if self.sat_queue:
             await self.sat_queue.put(SENTINEL)
@@ -636,6 +662,10 @@ class AudioProcessor:
         """Delegate to :class:`~whisperlivekit.sentence_detector.SentenceDetectionProcessor`."""
         await self._sentence_proc.run()
 
+    async def offline_translation_processor(self):
+        """Delegate to :class:`~whisperlivekit.translategemma.GemmaTranslationProcessor`."""
+        await self.translation.run()
+
     async def results_formatter(self):
         """Format processing results for output."""
         while True:
@@ -753,7 +783,10 @@ class AudioProcessor:
             processing_tasks_for_watchdog.append(self.diarization_task)
         
         if self.translation:
-            self.translation_task = asyncio.create_task(self.translation_processor())
+            if self.use_offline_translation:
+                self.translation_task = asyncio.create_task(self.offline_translation_processor())
+            else:
+                self.translation_task = asyncio.create_task(self.translation_processor())
             self.all_tasks_for_cleanup.append(self.translation_task)
             processing_tasks_for_watchdog.append(self.translation_task)
 
