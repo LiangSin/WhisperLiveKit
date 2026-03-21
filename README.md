@@ -71,7 +71,9 @@ Go to `chrome-extension` for instructions.
 |-----------|-------------|
 | **Windows/Linux optimizations** | `faster-whisper` |
 | **Apple Silicon optimizations** | `mlx-whisper` |
-| **Translation** | `nllw` |
+| **Translation (NLLW)** | `nllw` |
+| **Translation (TranslateGemma)** | `transformers` (model downloaded from HF on first use) |
+| **Sentence boundary detection** | `wtpsplit` |
 | **Speaker diarization** | `git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]` |
 | OpenAI API | `openai` |
 | *[Not recommanded]*  Speaker diarization with Diart | `diart` |
@@ -90,6 +92,13 @@ wlk --model large-v3 --language fr --target-language da
 
 # Diarization and server listening on */80 
 wlk --host 0.0.0.0 --port 80 --model medium --diarization --language fr
+
+# SaT sentence boundary detection (no translation): expose sentence segments to clients
+wlk --model large-v3 --language zh --sentence-detection
+
+# TranslateGemma sentence-level translation (SaT detection is enabled automatically)
+wlk --model large-v3 --language zh --target-language en \
+    --translation-model translategemma --translation-model-size 4b
 ```
 
 
@@ -156,10 +165,13 @@ async def websocket_endpoint(websocket: WebSocket):
 | `--forwarded-allow-ips` | Ip or Ips allowed to reverse proxy the whisperlivekit-server. Supported types are  IP Addresses (e.g. 127.0.0.1), IP Networks (e.g. 10.100.0.0/16), or Literals (e.g. /path/to/socket.sock) | `None` |
 | `--pcm-input` | raw PCM (s16le) data is expected as input and FFmpeg will be bypassed. Frontend will use AudioWorklet instead of MediaRecorder | `False` |
 
-| Translation options | Description | Default |
+| Translation & Sentence Detection options | Description | Default |
 |-----------|-------------|---------|
-| `--nllb-backend` | `transformers` or `ctranslate2` | `ctranslate2` |
-| `--nllb-size` | `600M` or `1.3B` | `600M` |
+| `--target-language` | Target language code for translation. Required to enable translation. | `` |
+| `--translation-model` | Translation backend: `nllw` (streaming, 200 languages) or `translategemma` (sentence-level, Google TranslateGemma). `translategemma` automatically enables sentence detection. | `nllw` |
+| `--translation-model-size` | Model size: `600M`/`1.3B` for NLLW; `4b`/`12b`/`27b` for TranslateGemma. | `600M` |
+| `--nllb-backend` | NLLW inference backend: `transformers` or `ctranslate2`. | `transformers` |
+| `--sentence-detection` | Enable SaT-based sentence boundary detection on validated transcription. Sentences are sent to clients as a `sentences` field (`[{text, start, end}, …]`). Requires `pip install wtpsplit`. Automatically enabled with `--translation-model translategemma`. | `False` |
 
 | Diarization options | Description | Default |
 |-----------|-------------|---------|
