@@ -12,7 +12,8 @@ import traceback
 import torch
 from typing import Optional
 
-from transformers import AutoModelForImageTextToText, AutoProcessor
+from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
+from vllm import LLM, SamplingParams
 
 logger = logging.getLogger(__name__)
 
@@ -23,8 +24,8 @@ logger = logging.getLogger(__name__)
 
 class TranslateGemmaModel:
     """
-    Loads and wraps a google/translategemma-*-it model for sentence-level
-    translation.
+    Loads and wraps a Infomaniak-AI/vllm-translategemma-*-it model for
+    sentence-level translation via vLLM with n-gram speculative decoding.
 
     Parameters
     ----------
@@ -34,35 +35,39 @@ class TranslateGemmaModel:
         BCP-47 source language code (e.g. "zh").
     tgt_lang:
         BCP-47 target language code (e.g. "en").
+    gpu_memory_utilization:
+        Fraction of GPU VRAM to allocate. Lower this if Whisper is on the
+        same GPU. Raise it if translation is on a dedicated GPU.
     """
 
-    def __init__(self, model_size: str = "4b", src_lang: str = "zh", tgt_lang: str = "en"):
+    def __init__(self, model_size: str = "4b", src_lang: str = "zh", tgt_lang: str = "en", gpu_memory_utilization: float = 0.7,):
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
-        self._load_model(model_size)
+        self._load_model(model_size, gpu_memory_utilization)
 
-        self.gen_kwargs = {"do_sample": False, "max_new_tokens": 128}
+        self.gen_kwargs = SamplingParams(
+            temperature=0,
+            max_tokens=128,
+            stop=["<eos>", "<end_of_turn>"],
+        )
 
-        tokenizer = getattr(self.processor, "tokenizer", None)
-        pad_token_id = getattr(tokenizer, "eos_token_id", None) if tokenizer else None
-        if pad_token_id is None and hasattr(self.model, "generation_config") and self.model.generation_config:
-            pad_token_id = getattr(self.model.generation_config, "eos_token_id", None)
-        if pad_token_id is None and hasattr(self.model, "config") and self.model.config:
-            pad_token_id = getattr(self.model.config, "eos_token_id", None)
-        if pad_token_id is None:
-            pad_token_id = 1  # Gemma tokenizer default; silences "Setting pad_token_id to eos_token_id" warning
+    def _load_model(self, model_size: str, gpu_memory_utilization: float):
+        model_id = f"Infomaniak-AI/vllm-translategemma-{model_size.lower()}-it"
 
-        self.gen_kwargs["pad_token_id"] = pad_token_id
+        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
 
-    def _load_model(self, model_size: str = "4b"):
-        model_id = f"google/translategemma-{model_size.lower()}-it"
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        self.processor = AutoProcessor.from_pretrained(model_id)
-        self.model = AutoModelForImageTextToText.from_pretrained(
-            model_id,
-            dtype=torch.bfloat16,
-        ).to(device)
+        self.model = LLM(
+            model=model_id,
+            dtype="bfloat16",
+            max_model_len=512,
+            gpu_memory_utilization=gpu_memory_utilization,
+            speculative_config={
+                "method": "ngram",
+                "num_speculative_tokens": 5,
+                "prompt_lookup_max": 4,
+            },
+            enforce_eager=False,
+        )
 
     def translate(self, text: str) -> str:
         """Translate *text* from src_lang to tgt_lang."""
@@ -72,25 +77,23 @@ class TranslateGemmaModel:
 
         messages = [{
             "role": "user",
-            "content": [{
-                "type": "text",
-                "source_lang_code": self.src_lang,
-                "target_lang_code": self.tgt_lang,
-                "text": text,
-            }],
+            "content": (
+                f"<<<source>>>{self.src_lang}"
+                f"<<<target>>>{self.tgt_lang}"
+                f"<<<text>>>{text}"
+            )
         }]
-        inputs = self.processor.apply_chat_template(
+        inputs = self.tokenizer.apply_chat_template(
             messages,
-            tokenize=True,
+            tokenize=False,
             add_generation_prompt=True,
-            return_dict=True,
-            return_tensors="pt",
-        ).to(self.model.device, dtype=torch.bfloat16)
+        )
 
-        input_len = len(inputs["input_ids"][0])
-        with torch.inference_mode():
-            output = self.model.generate(**inputs, **self.gen_kwargs)
-        return self.processor.decode(output[0][input_len:], skip_special_tokens=True)
+        outputs = self.model.generate(
+            [inputs],
+            self.gen_kwargs,
+        )
+        return outputs[0].outputs[0].text.strip()
 
 
 # ---------------------------------------------------------------------------
