@@ -24,6 +24,16 @@ from whisperlivekit.simul_whisper.simul_whisper import PaddedAlignAttWhisper
 logger = logging.getLogger(__name__)
 
 
+def _parse_device_for_ct2(device_str):
+    """Convert a torch device string like 'cuda:1' into CTranslate2 args."""
+    if device_str and device_str.startswith("cuda"):
+        parts = device_str.split(":")
+        return "cuda", int(parts[1]) if len(parts) > 1 else 0
+    if device_str == "cpu":
+        return "cpu", 0
+    return "auto", 0
+
+
 HAS_MLX_WHISPER = mlx_backend_available(warn_on_missing=True)
 if HAS_MLX_WHISPER:
     from .mlx_encoder import mlx_model_mapping, load_mlx_encoder
@@ -156,6 +166,7 @@ class SimulStreamingOnlineProcessor:
             
         except Exception as e:
             logger.exception(f"SimulStreaming processing error: {e}")
+            self.model._clean_cache()
             return [], self.end
 
     def warmup(self, audio, init_prompt=""):
@@ -214,6 +225,9 @@ class SimulStreamingASR():
         
         for key, value in kwargs.items():
             setattr(self, key, value)
+
+        if not hasattr(self, 'whisper_device'):
+            self.whisper_device = None
 
         if self.decoder_type is None:
             self.decoder_type = 'greedy' if self.beams == 1 else 'beam'
@@ -309,10 +323,12 @@ class SimulStreamingASR():
                 fw_model = str(self._resolved_model_path)
             else:
                 fw_model = self.model_name
+            fw_device, fw_device_index = _parse_device_for_ct2(self.whisper_device)
             self.fw_encoder = WhisperModel(
                 fw_model,
-                device='auto',
+                device=fw_device,
                 compute_type='auto',
+                device_index=fw_device_index,
             )
 
         self.models = [self.load_model() for i in range(self.preload_model_count)]
@@ -363,7 +379,8 @@ class SimulStreamingASR():
             name=self.pytorch_path if self.pytorch_path else self.model_name,
             download_root=self.model_path,
             decoder_only=self.fast_encoder,
-            custom_alignment_heads=self.custom_alignment_heads
+            custom_alignment_heads=self.custom_alignment_heads,
+            device=self.whisper_device,
             )
         warmup_audio = load_file(self.warmup_file)
         if warmup_audio is not None:

@@ -40,7 +40,7 @@ class TranslateGemmaModel:
         same GPU. Raise it if translation is on a dedicated GPU.
     """
 
-    def __init__(self, model_size: str = "4b", src_lang: str = "zh", tgt_lang: str = "en", gpu_memory_utilization: float = 0.7,):
+    def __init__(self, model_size: str = "4b", src_lang: str = "zh", tgt_lang: str = "en", gpu_memory_utilization: float = 0.95,):
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
         self._load_model(model_size, gpu_memory_utilization)
@@ -66,7 +66,7 @@ class TranslateGemmaModel:
                 "num_speculative_tokens": 5,
                 "prompt_lookup_max": 4,
             },
-            enforce_eager=False,
+            enforce_eager=True,
         )
 
     def translate(self, text: str) -> str:

@@ -38,7 +38,7 @@ def median_filter(x: torch.Tensor, filter_width: int):
             from .triton_ops import median_filter_cuda
 
             result = median_filter_cuda(x, filter_width)
-        except (RuntimeError, subprocess.CalledProcessError):
+        except (RuntimeError, ValueError, subprocess.CalledProcessError):
             warnings.warn(
                 "Failed to launch Triton kernels, likely due to missing CUDA toolkit; "
                 "falling back to a slower median kernel implementation..."
@@ -142,7 +142,7 @@ def dtw(x: torch.Tensor) -> np.ndarray:
     if x.is_cuda:
         try:
             return dtw_cuda(x)
-        except (RuntimeError, subprocess.CalledProcessError):
+        except (RuntimeError, ValueError, subprocess.CalledProcessError):
             warnings.warn(
                 "Failed to launch Triton kernels, likely due to missing CUDA toolkit; "
                 "falling back to a slower DTW implementation..."

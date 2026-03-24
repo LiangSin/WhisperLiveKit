@@ -12,6 +12,27 @@ def update_with_kwargs(_dict, kwargs):
     return _dict
 
 
+def _allocate_devices(has_translation, translation_model):
+    """Decide which CUDA device each component should use.
+
+    When two or more GPUs are visible and translategemma is enabled, 
+    whisper is placed on cuda:1 while vLLM keeps cuda:0 for translategemma.
+    """
+    import torch
+    if not torch.cuda.is_available():
+        return "cpu", "cpu"
+
+    n = torch.cuda.device_count()
+    if n >= 2 and has_translation and translation_model == "translategemma":
+        whisper_device = "cuda:1"
+        translation_device = "cuda:0"
+    else:
+        whisper_device = "cuda:0"
+        translation_device = "cuda:0"
+
+    return whisper_device, translation_device
+
+
 logger = logging.getLogger(__name__)
 
 class TranscriptionEngine:
@@ -76,7 +97,14 @@ class TranscriptionEngine:
             global_params['vac'] = not kwargs['no_vac']
 
         self.args = Namespace(**{**global_params, **transcription_common_params})
-        
+
+        has_translation = bool(self.args.target_language)
+        whisper_device, translation_device = _allocate_devices(
+            has_translation, self.args.translation_model,
+        )
+        self.whisper_device = whisper_device
+        self.translation_device = translation_device
+
         self.asr = None
         self.tokenizer = None
         self.diarization = None
@@ -120,6 +148,7 @@ class TranscriptionEngine:
                     **transcription_common_params,
                     **simulstreaming_params,
                     backend=self.args.backend,
+                    whisper_device=whisper_device,
                 )
                 logger.info(
                     "Using SimulStreaming policy with %s backend",
@@ -138,6 +167,7 @@ class TranscriptionEngine:
                     backend=self.args.backend,
                     **transcription_common_params,
                     **whisperstreaming_params,
+                    whisper_device=whisper_device,
                 )
                 logger.info(
                     "Using LocalAgreement policy with %s backend",
@@ -193,16 +223,17 @@ class TranscriptionEngine:
                 )
 
         self.sat_model = None
-        need_sat = self.args.sentence_detection
+        need_sat = self.args.sentence_detection or (
+            bool(self.args.target_language)
+            and self.args.translation_model == "translategemma"
+        )
         if need_sat:
             try:
                 import torch
                 from wtpsplit import SaT
-                device = "cuda" if torch.cuda.is_available() else "cpu"
                 sat = SaT("sat-3l-sm")
-                sat.half().to(device)
+                sat.half().to(translation_device)
                 self.sat_model = sat
-                logger.info("SaT sentence-detection model loaded on %s", device)
             except ImportError:
                 raise Exception(
                     "wtpsplit is required for sentence detection / TranslateGemma. "

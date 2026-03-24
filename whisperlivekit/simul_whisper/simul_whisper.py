@@ -80,7 +80,7 @@ class PaddedAlignAttWhisper:
             self.coreml_encoder_tuple = load_coreml_encoder()
         self.use_mlcore = self.coreml_encoder_tuple is not None
         
-        self.device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        self.device = next(self.model.parameters()).device
         
         logger.info(f"Model dimensions: {self.model.dims}")
         self.speaker = -1
