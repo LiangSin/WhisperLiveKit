@@ -390,7 +390,7 @@ class AudioProcessor:
                                 matched_phrase,
                                 check_text[:120],
                             )
-                            self.transcription.force_refresh()
+                            self.transcription.force_refresh(current_time_offset=self.state.end_buffer)
                             self._boh_recent_text = ""
                             self._repeat_detector.reset()
                             logger.warning(

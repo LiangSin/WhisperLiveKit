@@ -179,17 +179,21 @@ class SimulStreamingOnlineProcessor:
         except Exception as e:
             logger.exception(f"SimulStreaming warmup failed: {e}")
 
-    def force_refresh(self):
+    def force_refresh(self, current_time_offset=None):
         """Discard all pending state and force a complete context reset.
 
         Called when a hallucination phrase is detected in the model output.
         Clears the KV cache, attention matrices, and all buffered segments so
         that the next inference starts from a clean slate.
+
+        When `current_time_offset` is provided, global_time_offset is
+        updated so that new tokens continue with monotonically increasing
+        timestamps instead of colliding with earlier sentences.
         """
         if self.model is not None:
-            # self.model._clean_cache()
             self.model.refresh_segment(complete=True)
-        # self.buffer = []
+            if current_time_offset is not None:
+                self.model.global_time_offset = current_time_offset
 
     def close(self):
         """Explicitly clean up resources."""
