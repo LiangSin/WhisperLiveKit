@@ -12,6 +12,7 @@ import logging
 import traceback
 import torch
 from collections import Counter
+from time import monotonic
 from typing import List, Optional
 
 from whisperlivekit.timed_objects import ASRToken, Sentence, Silence, Line
@@ -184,6 +185,18 @@ class SentenceDetectionProcessor:
         self.sentinel = sentinel
         self.translation_sentence_queue = translation_sentence_queue
         self.hallucination_reset = hallucination_reset
+        self._silence_started_at: Optional[float] = None
+        self._silence_flushed = False
+
+    async def _flush_pending_sentence(self):
+        sentence = await asyncio.to_thread(self.detector.flush)
+        async with self.lock:
+            if sentence:
+                self.state.sentence_segments.append(sentence)
+            self.state.sentence_pending = None
+        if sentence and self.translation_sentence_queue:
+            await self.translation_sentence_queue.put((sentence, False))
+        self._silence_flushed = True
 
     async def run(self):
         """Main processing loop — run as an ``asyncio.Task``."""
@@ -193,14 +206,8 @@ class SentenceDetectionProcessor:
 
                 if item is self.sentinel:
                     logger.debug("SentenceDetectionProcessor: sentinel received, flushing.")
-                    sentence = await asyncio.to_thread(self.detector.flush)
-                    async with self.lock:
-                        if sentence:
-                            self.state.sentence_segments.append(sentence)
-                        self.state.sentence_pending = None
+                    await self._flush_pending_sentence()
                     if self.translation_sentence_queue:
-                        if sentence:
-                            await self.translation_sentence_queue.put((sentence, False))
                         await self.translation_sentence_queue.put(self.sentinel)
                     self.sat_queue.task_done()
                     break
@@ -209,21 +216,28 @@ class SentenceDetectionProcessor:
                     self.detector.reset()
                     async with self.lock:
                         self.state.sentence_pending = None
+                    self._silence_started_at = None
+                    self._silence_flushed = False
                     self.sat_queue.task_done()
 
                 elif isinstance(item, Silence):
-                    if item.has_ended and item.duration > 5:
-                        # Prolonged silence is a reliable sentence boundary
-                        sentence = await asyncio.to_thread(self.detector.flush)
-                        async with self.lock:
-                            if sentence:
-                                self.state.sentence_segments.append(sentence)
-                            self.state.sentence_pending = None
-                        if sentence and self.translation_sentence_queue:
-                            await self.translation_sentence_queue.put((sentence, False))
+                    if item.has_ended:
+                        if item.duration and item.duration > 5:
+                            # Prolonged silence is a reliable sentence boundary.
+                            await self._flush_pending_sentence()
+                        self._silence_started_at = None
+                        self._silence_flushed = False
+                    else:
+                        if self._silence_started_at is None:
+                            self._silence_started_at = monotonic()
+                        elif not self._silence_flushed and (monotonic() - self._silence_started_at) > 5:
+                            await self._flush_pending_sentence()
                     self.sat_queue.task_done()
 
                 elif isinstance(item, list):
+                    # Any token batch means silence has ended/resumed speech.
+                    self._silence_started_at = None
+                    self._silence_flushed = False
                     sentences = await asyncio.to_thread(self.detector.push, item)
                     # Only store completed sentences; propagate pending for live display.
                     async with self.lock:
