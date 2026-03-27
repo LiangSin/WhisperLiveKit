@@ -394,8 +394,9 @@ class AudioProcessor:
                             self._boh_recent_text = ""
                             self._repeat_detector.reset()
                             logger.warning(
-                                "[BoH] Context force-refreshed. Discarding %d token(s).",
+                                "[BoH] Context force-refreshed. Discarding %d token(s): %s",
                                 len(new_tokens),
+                                new_text,
                             )
                             new_tokens = []
                             _buffer_transcript = self.transcription.get_buffer()

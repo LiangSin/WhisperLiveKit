@@ -86,6 +86,7 @@ class StreamingSentenceDetector:
         Clear pending tokens. Call when hallucination is detected so SaT
         does not build on invalid text.
         """
+        logger.warning("[SaT] Resetting pending tokens: %s", "".join(t.text for t in self.pending_tokens))
         self.pending_tokens.clear()
 
     # ------------------------------------------------------------------

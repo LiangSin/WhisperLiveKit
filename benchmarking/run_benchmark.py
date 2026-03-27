@@ -8,6 +8,26 @@ import time
 from tqdm import tqdm
 import struct
 
+
+def parse_end(value, default=0.0) -> float:
+    """Convert a line's end field to float seconds.
+
+    Line.to_dict() serialises timestamps as 'H:MM:SS' strings via format_time().
+    This helper handles both that format and plain numeric values so the
+    benchmark accumulation logic can compare timestamps correctly.
+    """
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return float(value)
+    # 'H:MM:SS' or 'HH:MM:SS'
+    try:
+        parts = str(value).split(":")
+        seconds = sum(float(p) * 60 ** i for i, p in enumerate(reversed(parts)))
+        return seconds
+    except (ValueError, AttributeError):
+        return default
+
 # Ensure we can import dataset
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import DatasetClass
@@ -88,20 +108,52 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     await websocket.send(wav_header)
 
                 # State variable to track transcript for the whole chapter
-                final_transcript_for_chapter = ""
-                final_translation_lines = []
+                accumulated_text = ""           # committed sentences concatenated so far
+                accumulated_end = 0.0           # end timestamp of the last committed sentence
+                pending_text = ""               # last (possibly in-progress) sentence from latest batch
+                accumulated_translation = ""    # committed translations concatenated so far
+                accumulated_translation_end = 0.0  # end timestamp of last committed translation line
+                pending_translation = ""        # translation of the current pending sentence
 
                 def update_transcript(msg_data):
-                    nonlocal final_transcript_for_chapter, final_translation_lines
-                    if "lines" in msg_data:
-                        lines = msg_data["lines"]
-                        text_parts = [l.get("text", "") for l in lines if l.get("text")]
-                        current_text = " ".join(text_parts)
-                        if current_text:
-                            final_transcript_for_chapter = current_text
-                        translation_parts = [l.get("translation", "").strip() for l in lines if l.get("translation", "").strip()]
-                        if translate and translation_parts:
-                            final_translation_lines = translation_parts
+                    nonlocal accumulated_text, accumulated_end, pending_text
+                    nonlocal accumulated_translation, accumulated_translation_end, pending_translation
+                    if "lines" not in msg_data:
+                        return
+                    lines = msg_data["lines"]
+                    if not lines:
+                        return
+
+                    # The last line may still be a pending/in-progress sentence that
+                    # will be updated in the next message; all preceding lines are stable.
+                    committed_lines = lines[:-1]
+                    last_line = lines[-1]
+
+                    new_lines = [l for l in committed_lines if parse_end(l.get("end")) > accumulated_end]
+                    if new_lines:
+                        new_text = " ".join(l.get("text", "") for l in new_lines if l.get("text"))
+                        if new_text:
+                            accumulated_text = (accumulated_text + " " + new_text).strip()
+                        accumulated_end = max(parse_end(l.get("end")) for l in new_lines)
+
+                    # Track the latest pending sentence (may be replaced next message).
+                    pending_text = last_line.get("text", "") if parse_end(last_line.get("end")) > accumulated_end else ""
+
+                    if translate:
+                        new_trans_lines = [l for l in committed_lines if parse_end(l.get("end")) > accumulated_translation_end]
+                        if new_trans_lines:
+                            new_trans = " ".join(
+                                l.get("translation", "").strip()
+                                for l in new_trans_lines
+                                if l.get("translation", "").strip()
+                            )
+                            if new_trans:
+                                accumulated_translation = (accumulated_translation + " " + new_trans).strip()
+                            accumulated_translation_end = max(parse_end(l.get("end")) for l in new_trans_lines)
+
+                        # Track pending translation (mirrors pending_text logic).
+                        last_trans = last_line.get("translation", "").strip()
+                        pending_translation = last_trans if parse_end(last_line.get("end")) > accumulated_translation_end else ""
 
                 async def send_audio():
                     """Stream audio chunks to the websocket."""
@@ -163,9 +215,8 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     await asyncio.gather(send_task, recv_task, return_exceptions=True)
 
                 if translate and translate_out is not None:
-                    for tline in final_translation_lines:
-                        translate_out.write(tline + " ")
-                    translate_out.write("\n")
+                    full_translation = " ".join(filter(None, [accumulated_translation, pending_translation])).strip()
+                    translate_out.write(full_translation + "\n")
                     translate_out.flush()
 
                 # Write COMET reference to translate_answer_out
@@ -176,7 +227,8 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                             translate_answer_out.write(trans_result + "\n")
                     translate_answer_out.flush()
 
-                hyp = final_transcript_for_chapter.strip()
+                # Combine committed sentences with the final pending sentence (if any).
+                hyp = " ".join(filter(None, [accumulated_text, pending_text])).strip()
                 # Concatenate references
                 ref = " ".join([s['text'] for s in chapter_samples])
                 
