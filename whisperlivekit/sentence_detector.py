@@ -65,9 +65,8 @@ class StreamingSentenceDetector:
         segments = self.sat.split(pending_text)
 
         if len(self.pending_tokens) >= self.max_tokens and len(segments) < 2:
-            # No boundary found - force-split at midpoint
-            mid = len(self.pending_tokens) // 2
-            segments = [pending_text[:mid]]
+            mid_char = len(pending_text) // 2
+            segments = [pending_text[:mid_char], pending_text[mid_char:]]
 
         return self._extract_sentences(segments)
 
