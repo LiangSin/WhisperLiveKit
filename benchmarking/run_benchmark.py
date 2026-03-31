@@ -140,19 +140,18 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     pending_text = last_line.get("text", "") if parse_end(last_line.get("end")) > accumulated_end else ""
 
                     if translate:
-                        new_trans_lines = [l for l in committed_lines if parse_end(l.get("end")) > accumulated_translation_end]
-                        if new_trans_lines:
-                            new_trans = " ".join(
-                                l.get("translation", "").strip()
-                                for l in new_trans_lines
-                                if l.get("translation", "").strip()
-                            )
-                            if new_trans:
-                                accumulated_translation = (accumulated_translation + " " + new_trans).strip()
-                            accumulated_translation_end = max(parse_end(l.get("end")) for l in new_trans_lines)
+                        for l in committed_lines:
+                            line_end = parse_end(l.get("end"))
+                            if line_end <= accumulated_translation_end:
+                                continue
+                            trans = (l.get("translation") or "").strip()
+                            if not trans:
+                                break
+                            accumulated_translation = (accumulated_translation + " " + trans).strip()
+                            accumulated_translation_end = line_end
 
                         # Track pending translation (mirrors pending_text logic).
-                        last_trans = last_line.get("translation", "").strip()
+                        last_trans = (last_line.get("translation") or "").strip()
                         pending_translation = last_trans if parse_end(last_line.get("end")) > accumulated_translation_end else ""
 
                 async def send_audio():
