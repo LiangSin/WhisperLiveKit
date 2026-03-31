@@ -134,3 +134,4 @@ chrome-extension/live_transcription.*
 
 # Benchmarking
 benchmarking/results/
+benchmarking/cuckoo/crawl/
