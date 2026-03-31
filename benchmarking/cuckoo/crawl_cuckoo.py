@@ -76,6 +76,7 @@ async def crawl(meeting_url: str, output_stem: str):
 
         print(f"Opening page: {meeting_url}")
         await page.goto(meeting_url)
+        await page.wait_for_timeout(800) # wait for contents to be loaded
 
         # Wait for the subtitle block to load
         print("Waiting for subtitle block to load...")
