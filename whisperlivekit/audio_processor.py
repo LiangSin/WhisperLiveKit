@@ -269,10 +269,6 @@ class AudioProcessor:
         beg = time()
         while True:
             try:
-                if self.is_stopping:
-                    logger.info("Stopping ffmpeg_stdout_reader due to stopping flag.")
-                    break
-
                 state = await self.ffmpeg_manager.get_state() if self.ffmpeg_manager else FFmpegState.STOPPED
                 if state == FFmpegState.FAILED:
                     logger.error("FFmpeg is in FAILED state, cannot read data")
@@ -281,6 +277,8 @@ class AudioProcessor:
                     logger.info("FFmpeg is stopped")
                     break
                 elif state != FFmpegState.RUNNING:
+                    if self.is_stopping:
+                        break
                     await asyncio.sleep(0.1)
                     continue
 
@@ -290,10 +288,15 @@ class AudioProcessor:
                 beg = current_time
 
                 chunk = await self.ffmpeg_manager.read_data(buffer_size)
-                if not chunk:
-                    # No data currently available
+                if chunk is None:
+                    if self.is_stopping:
+                        break
                     await asyncio.sleep(0.05)
                     continue
+                if not chunk:
+                    # Empty bytes = EOF on FFmpeg stdout; all data has been read.
+                    logger.info("FFmpeg stdout EOF reached.")
+                    break
 
                 self.pcm_buffer.extend(chunk)
                 await self.handle_pcm_data()
@@ -305,6 +308,17 @@ class AudioProcessor:
                 logger.warning(f"Exception in ffmpeg_stdout_reader: {e}")
                 logger.debug(f"Traceback: {traceback.format_exc()}")
                 await asyncio.sleep(0.2)
+
+        # Flush any sub-threshold PCM data remaining in the buffer.
+        if self.pcm_buffer:
+            aligned_size = (len(self.pcm_buffer) // self.bytes_per_sample) * self.bytes_per_sample
+            if aligned_size > 0:
+                pcm_array = self.convert_pcm_to_float(self.pcm_buffer[:aligned_size])
+                self.pcm_buffer = bytearray()
+                if not self.diarization_before_transcription and self.transcription_queue:
+                    await self.transcription_queue.put(pcm_array)
+                if self.args.diarization and self.diarization_queue:
+                    await self.diarization_queue.put(pcm_array.copy())
 
         logger.info("FFmpeg stdout processing finished. Signaling downstream processors if needed.")
         if not self.diarization_before_transcription and self.transcription_queue:
@@ -319,6 +333,26 @@ class AudioProcessor:
                 item = await self.transcription_queue.get()
                 if item is SENTINEL:
                     logger.debug("Transcription processor received sentinel. Finishing.")
+                    # Flush remaining uncommitted tokens so the tail of the transcription is not silently lost.
+                    if hasattr(self.transcription, 'finish'):
+                        remaining_tokens, final_processed_upto = await asyncio.to_thread(
+                            self.transcription.finish
+                        )
+                    else:
+                        remaining_tokens, final_processed_upto = await asyncio.to_thread(
+                            self.transcription.process_iter, True
+                        )
+                    if remaining_tokens:
+                        remaining_tokens = list(remaining_tokens)
+                        async with self.lock:
+                            self.state.tokens.extend(remaining_tokens)
+                            self.state.buffer_transcription = Transcript()
+                            self.state.end_buffer = max(self.state.end_buffer, final_processed_upto)
+                        if self.translation_queue and not self.use_offline_translation:
+                            for token in remaining_tokens:
+                                await self.translation_queue.put(token)
+                        if self.sat_queue:
+                            await self.sat_queue.put(list(remaining_tokens))
                     self.transcription_queue.task_done()
                     break
 
@@ -877,12 +911,25 @@ class AudioProcessor:
         if not message:
             logger.info("Empty audio message received, initiating stop sequence.")
             self.is_stopping = True
-             
-            if self.transcription_queue:
-                await self.transcription_queue.put(SENTINEL)
 
-            if not self.is_pcm_input and self.ffmpeg_manager:
-                await self.ffmpeg_manager.stop()
+            if self.is_pcm_input:
+                # PCM path: flush remaining buffer and signal end directly.
+                if self.pcm_buffer:
+                    aligned_size = (len(self.pcm_buffer) // self.bytes_per_sample) * self.bytes_per_sample
+                    if aligned_size > 0:
+                        pcm_array = self.convert_pcm_to_float(self.pcm_buffer[:aligned_size])
+                        self.pcm_buffer = bytearray()
+                        if not self.diarization_before_transcription and self.transcription_queue:
+                            await self.transcription_queue.put(pcm_array)
+                        if self.args.diarization and self.diarization_queue:
+                            await self.diarization_queue.put(pcm_array.copy())
+                if self.transcription_queue:
+                    await self.transcription_queue.put(SENTINEL)
+            else:
+                # Non-PCM (FFmpeg) path: close stdin so FFmpeg finishes
+                # processing buffered data and exits naturally.
+                if self.ffmpeg_manager:
+                    await self.ffmpeg_manager.close_stdin()
 
             return
 

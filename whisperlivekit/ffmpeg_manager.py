@@ -100,6 +100,18 @@ class FFmpegManager:
                 await self.on_error_callback("start_failed")
             return False
 
+    async def close_stdin(self):
+        """Close FFmpeg's stdin to signal EOF.
+
+        FFmpeg will finish processing any buffered data and exit naturally,
+        allowing the stdout reader to drain remaining output.
+        """
+        if self.process and self.process.stdin:
+            try:
+                self.process.stdin.close()
+            except Exception as e:
+                logger.warning(f"Error closing FFmpeg stdin: {e}")
+
     async def stop(self):
         async with self._state_lock:
             if self.state == FFmpegState.STOPPED:
