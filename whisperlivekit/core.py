@@ -222,6 +222,11 @@ class TranscriptionEngine:
                     tgt_lang=self.args.target_language
                 )
 
+        self.translation_dispatcher = None
+        if self.translation_model is not None and self.args.translation_model == "translategemma":
+            from whisperlivekit.translategemma import TranslationDispatcher
+            self.translation_dispatcher = TranslationDispatcher(self.translation_model)
+
         self.sat_model = None
         need_sat = self.args.sentence_detection or (
             bool(self.args.target_language)
