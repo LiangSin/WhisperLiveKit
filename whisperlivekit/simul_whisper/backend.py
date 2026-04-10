@@ -18,6 +18,7 @@ from whisperlivekit.backend_support import (
 )
 
 import torch
+from contextlib import contextmanager
 from whisperlivekit.simul_whisper.config import AlignAttConfig
 from whisperlivekit.simul_whisper.simul_whisper import PaddedAlignAttWhisper
 
@@ -60,7 +61,7 @@ class SimulStreamingOnlineProcessor:
         self.committed: List[ASRToken] = []
         self.last_result_tokens: List[ASRToken] = []
         self.model = None
-        # self.load_new_backend()
+        self._cuda_stream = None
         
         #can be moved
         if asr.tokenizer:
@@ -84,6 +85,11 @@ class SimulStreamingOnlineProcessor:
         self.model.refresh_segment(complete=True)
         if hasattr(self, 'model_tokenizer'):
              self.model.tokenizer = self.model_tokenizer
+
+        device = getattr(self.asr, 'whisper_device', None)
+        if device and torch.cuda.is_available() and 'cuda' in str(device):
+            self._cuda_stream = torch.cuda.Stream(device=torch.device(device))
+            logger.info("Created dedicated CUDA stream on %s for client.", device)
 
     def load_new_backend(self):
         # This method is kept for compatibility or synchronous usage if needed, 
@@ -138,36 +144,47 @@ class SimulStreamingOnlineProcessor:
         concat_buffer = Transcript.from_tokens(tokens= self.buffer, sep='')
         return concat_buffer
 
+    @contextmanager
+    def _on_stream(self):
+        """Route GPU work to this client's dedicated CUDA stream.
+
+        Using non-default streams avoids implicit synchronisation with
+        the legacy default stream (stream 0), which would otherwise
+        serialise all clients' GPU work on the same device.
+        """
+        if self._cuda_stream is not None:
+            with torch.cuda.stream(self._cuda_stream):
+                yield
+        else:
+            yield
+
     def process_iter(self, is_last=False) -> Tuple[List[ASRToken], float]:
         """
         Process accumulated audio chunks using SimulStreaming.
         
         Returns a tuple: (list of committed ASRToken objects, float representing the audio processed up to time).
         """
-        try:
-            timestamped_words = self.model.infer(is_last=is_last)
-            if self.model.cfg.language == "auto" and timestamped_words and timestamped_words[0].detected_language == None:
-                self.buffer.extend(timestamped_words)
+        with self._on_stream():
+            try:
+                timestamped_words = self.model.infer(is_last=is_last)
+                if self.model.cfg.language == "auto" and timestamped_words and timestamped_words[0].detected_language == None:
+                    self.buffer.extend(timestamped_words)
+                    return [], self.end
+                
+                self.committed.extend(timestamped_words)
+
+                if len(self.committed) > 1500:
+                    removed_count = len(self.committed) - 1000
+                    self.committed = self.committed[-1000:]
+                    logger.info(f"Gradually cleaned up {removed_count} old committed tokens, keeping recent 1000")
+
+                self.buffer = []
+                return timestamped_words, self.end
+                
+            except Exception as e:
+                logger.exception(f"SimulStreaming processing error: {e}")
+                self.model._clean_cache()
                 return [], self.end
-            
-            self.committed.extend(timestamped_words)
-
-            # Gradual cleanup to prevent state accumulation
-            # Clean up old committed tokens when they exceed a threshold
-            if len(self.committed) > 1500:  # Start cleaning at 1500 tokens
-                # Keep the most recent 1000 tokens to maintain context
-                removed_count = len(self.committed) - 1000
-                self.committed = self.committed[-1000:]
-                logger.info(f"Gradually cleaned up {removed_count} old committed tokens, keeping recent 1000")
-
-            self.buffer = []
-            return timestamped_words, self.end
-
-            
-        except Exception as e:
-            logger.exception(f"SimulStreaming processing error: {e}")
-            self.model._clean_cache()
-            return [], self.end
 
     def warmup(self, audio, init_prompt=""):
         """Warmup the SimulStreaming model."""
@@ -197,6 +214,9 @@ class SimulStreamingOnlineProcessor:
 
     def close(self):
         """Explicitly clean up resources."""
+        if self._cuda_stream is not None:
+            self._cuda_stream.synchronize()
+
         if self.model is not None:
             self.model.remove_hooks()
             self.asr.release_model(self.model.model)
