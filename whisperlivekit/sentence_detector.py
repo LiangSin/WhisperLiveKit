@@ -39,7 +39,7 @@ class StreamingSentenceDetector:
         Force-flush when pending tokens exceed this count.
     """
 
-    def __init__(self, sat_model=None, max_tokens: int = 80):
+    def __init__(self, sat_model=None, max_tokens: int = 30):
         if sat_model is not None:
             self.sat = sat_model
         else:
