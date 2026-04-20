@@ -6,6 +6,8 @@ from whisperlivekit import TranscriptionEngine, AudioProcessor, get_inline_ui_ht
 from whisperlivekit.ip_middleware import create_ip_middleware
 import asyncio
 import logging
+from datetime import datetime, timezone
+from pathlib import Path
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logging.getLogger().setLevel(logging.WARNING)
@@ -14,6 +16,17 @@ logger.setLevel(logging.DEBUG)
 
 args = parse_args()
 transcription_engine = None
+
+
+def _build_session_dir_name(archive_root: str) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    base_path = Path(archive_root)
+    candidate = timestamp
+    suffix = 1
+    while (base_path / candidate).exists():
+        candidate = f"{timestamp}_{suffix:02d}"
+        suffix += 1
+    return candidate
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):    
@@ -87,8 +100,11 @@ async def websocket_endpoint(websocket: WebSocket):
             return
 
     global transcription_engine
+    audio_processor_kwargs = {"transcription_engine": transcription_engine}
+    if getattr(args, "archive_enabled", False):
+        audio_processor_kwargs["session_dir_name"] = _build_session_dir_name(args.archive_dir)
     audio_processor = AudioProcessor(
-        transcription_engine=transcription_engine,
+        **audio_processor_kwargs,
     )
     await websocket.accept()
     logger.info("WebSocket connection opened.")

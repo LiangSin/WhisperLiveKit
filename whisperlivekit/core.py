@@ -72,6 +72,11 @@ class TranscriptionEngine:
             "backend": "auto",
             "translation_model": "nllw",
             "sentence_detection": False,
+            "archive_enabled": True,
+            "archive_dir": "archives",
+            "archive_segment_seconds": 1800.0,
+            "archive_subtitle_flush_seconds": 5.0,
+            "archive_audio_format": "webm",
         }
         global_params = update_with_kwargs(global_params, kwargs)
 

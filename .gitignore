@@ -131,6 +131,7 @@ nllb-200-distilled-600M-ctranslate2/*
 logs/
 chrome-extension/web/
 chrome-extension/live_transcription.*
+archives/
 
 # Benchmarking
 benchmarking/results/

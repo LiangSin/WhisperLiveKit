@@ -353,6 +353,49 @@ def parse_args():
         ),
     )
 
+    parser.add_argument(
+        "--archive-enabled",
+        action="store_true",
+        default=True,
+        dest="archive_enabled",
+        help="Enable per-connection archival outputs (audio segments + SRT files).",
+    )
+    parser.add_argument(
+        "--no-archive",
+        action="store_false",
+        dest="archive_enabled",
+        help="Disable per-connection archival outputs.",
+    )
+    parser.add_argument(
+        "--archive-dir",
+        type=str,
+        default="archives",
+        dest="archive_dir",
+        help="Base directory used to store connection archives.",
+    )
+    parser.add_argument(
+        "--archive-segment-seconds",
+        type=float,
+        default=1800.0,
+        dest="archive_segment_seconds",
+        help="Archive rotation interval in seconds.",
+    )
+    parser.add_argument(
+        "--archive-subtitle-flush-seconds",
+        type=float,
+        default=5.0,
+        dest="archive_subtitle_flush_seconds",
+        help="How often subtitle files are flushed to disk.",
+    )
+    parser.add_argument(
+        "--archive-audio-format",
+        type=str,
+        default="webm",
+        choices=["webm"],
+        dest="archive_audio_format",
+        help="Archived audio container format for each segment.",
+    )
+
     simulstreaming_group.add_argument(
         "--nllb-backend",
         type=str,

@@ -6,6 +6,7 @@ import logging
 import traceback
 from whisperlivekit.timed_objects import ASRToken, Silence, Line, FrontData, State, Transcript, ChangeSpeaker
 from whisperlivekit.core import TranscriptionEngine, online_factory, online_diarization_factory, online_translation_factory
+from whisperlivekit.archive_writer import ConnectionArchiveWriter
 from whisperlivekit.silero_vad_iterator import FixedVADIterator
 from whisperlivekit.ten_vad_iterator import TenVADIterator
 from whisperlivekit.results_formater import format_output
@@ -155,6 +156,18 @@ class AudioProcessor:
         self.translation = None
         self.diarization = None
         self.sentence_detector = None
+        self.archive_writer = None
+
+        if getattr(self.args, "archive_enabled", False):
+            session_dir_name = kwargs.get("session_dir_name")
+            if session_dir_name:
+                self.archive_writer = ConnectionArchiveWriter(
+                    archive_dir=self.args.archive_dir,
+                    session_dir_name=session_dir_name,
+                    segment_seconds=self.args.archive_segment_seconds,
+                    subtitle_flush_seconds=self.args.archive_subtitle_flush_seconds,
+                    audio_format=self.args.archive_audio_format,
+                )
 
         if self.args.transcription:
             self.transcription = online_factory(self.args, models.asr)        
@@ -764,8 +777,12 @@ class AudioProcessor:
                                 
                 should_push = (response != self.last_response_content)
                 if should_push and (lines or buffer_transcription or buffer_diarization or response_status == "no_audio_detected"):
+                    if self.archive_writer and lines:
+                        self.archive_writer.ingest_lines(lines)
                     yield response
                     self.last_response_content = response
+                if self.archive_writer:
+                    self.archive_writer.flush_subtitles_if_due()
                 
                 if self.is_stopping and self._processing_tasks_done():
                     logger.info("Results formatter: All upstream processors are done and in stopping state. Terminating.")
@@ -887,6 +904,8 @@ class AudioProcessor:
             
         if self.transcription and hasattr(self.transcription, 'close'):
             self.transcription.close()
+        if self.archive_writer:
+            await self.archive_writer.close()
             
         logger.info("AudioProcessor cleanup complete.")
 
@@ -941,6 +960,8 @@ class AudioProcessor:
             self.pcm_buffer.extend(message)
             await self.handle_pcm_data()
         else:
+            if self.archive_writer:
+                await self.archive_writer.write_audio_chunk(message)
             if not self.ffmpeg_manager:
                 logger.error("FFmpeg manager not initialized for non-PCM input.")
                 return
