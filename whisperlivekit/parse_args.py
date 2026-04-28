@@ -343,7 +343,6 @@ def parse_args():
     simulstreaming_group.add_argument(
         "--translategemma-url",
         type=str,
-        default=None,
         dest="translategemma_url",
         default="http://localhost:8765/v1",
         help=(
