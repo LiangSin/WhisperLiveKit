@@ -285,7 +285,7 @@ class GemmaTranslationProcessor:
 
 if __name__ == "__main__":
     async def _smoke_test():
-        client = TranslateGemmaClient(model_size="4b", src_lang="zh", tgt_lang="en")
+        client = TranslateGemmaClient(model_size="4b", src_lang="zh", tgt_lang="en", base_url="http://localhost:8765/v1")
         try:
             print(await client.translate("你好，最近怎麼樣？"))
         finally:
