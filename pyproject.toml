@@ -42,6 +42,7 @@ dependencies = [
 
 [project.optional-dependencies]
 translation = ["nllw"]
+translategemma_client = ["httpx>=0.24"]
 sentence_tokenizer = ["mosestokenizer", "wtpsplit"]
 
 [project.urls]

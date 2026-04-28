@@ -178,7 +178,7 @@ class AudioProcessor:
             if self.args.translation_model == "translategemma":
                 from whisperlivekit.translategemma import GemmaTranslationProcessor
                 self.translation = GemmaTranslationProcessor(
-                    dispatcher=models.translation_dispatcher,
+                    client=models.translation_model,
                     translation_sentence_queue=self.translation_queue,
                     state=self.state,
                     lock=self.lock,

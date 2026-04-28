@@ -72,7 +72,7 @@ Go to `chrome-extension` for instructions.
 | **Windows/Linux optimizations** | `faster-whisper` |
 | **Apple Silicon optimizations** | `mlx-whisper` |
 | **Translation (NLLW)** | `nllw` |
-| **Translation (TranslateGemma)** | `transformers` (model downloaded from HF on first use) |
+| **Translation (TranslateGemma)** | `httpx` — TranslateGemma now runs as a separate vLLM container; see [`translate-gemma/`](./translate-gemma/) for how to launch it. |
 | **Sentence boundary detection** | `wtpsplit` |
 | **Speaker diarization** | `git+https://github.com/NVIDIA/NeMo.git@main#egg=nemo_toolkit[asr]` |
 | OpenAI API | `openai` |
@@ -170,6 +170,7 @@ async def websocket_endpoint(websocket: WebSocket):
 | `--target-language` | Target language code for translation. Required to enable translation. | `` |
 | `--translation-model` | Translation backend: `nllw` (streaming, 200 languages) or `translategemma` (sentence-level, Google TranslateGemma). `translategemma` automatically enables sentence detection. | `nllw` |
 | `--translation-model-size` | Model size: `600M`/`1.3B` for NLLW; `4b`/`12b`/`27b` for TranslateGemma. | `600M` |
+| `--translategemma-url` | OpenAI-compatible endpoint of the standalone TranslateGemma vLLM service (see [`translate-gemma/`](./translate-gemma/)). Falls back to the `TRANSLATEGEMMA_URL` env var. Only used with `--translation-model translategemma`. | `http://localhost:8765/v1` |
 | `--nllb-backend` | NLLW inference backend: `transformers` or `ctranslate2`. | `transformers` |
 | `--sentence-detection` | Enable SaT-based sentence boundary detection on validated transcription. Sentences are sent to clients as a `sentences` field (`[{text, start, end}, …]`). Requires `pip install wtpsplit`. Automatically enabled with `--translation-model translategemma`. | `False` |
 

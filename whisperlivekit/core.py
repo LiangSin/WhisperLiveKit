@@ -12,25 +12,15 @@ def update_with_kwargs(_dict, kwargs):
     return _dict
 
 
-def _allocate_devices(has_translation, translation_model):
+def _allocate_devices():
     """Decide which CUDA device each component should use.
 
-    When two or more GPUs are visible and translategemma is enabled, 
-    whisper is placed on cuda:1 while vLLM keeps cuda:0 for translategemma.
+    Currently, all components live on the first visible GPU.
     """
     import torch
     if not torch.cuda.is_available():
         return "cpu", "cpu"
-
-    n = torch.cuda.device_count()
-    if n >= 2 and has_translation and translation_model == "translategemma":
-        whisper_device = "cuda:1"
-        translation_device = "cuda:0"
-    else:
-        whisper_device = "cuda:0"
-        translation_device = "cuda:0"
-
-    return whisper_device, translation_device
+    return "cuda:0", "cuda:0"
 
 
 logger = logging.getLogger(__name__)
@@ -71,6 +61,7 @@ class TranscriptionEngine:
             "backend_policy": "simulstreaming",
             "backend": "auto",
             "translation_model": "nllw",
+            "translategemma_url": None,
             "sentence_detection": False,
             "archive_enabled": True,
             "archive_dir": "archives",
@@ -103,10 +94,7 @@ class TranscriptionEngine:
 
         self.args = Namespace(**{**global_params, **transcription_common_params})
 
-        has_translation = bool(self.args.target_language)
-        whisper_device, translation_device = _allocate_devices(
-            has_translation, self.args.translation_model,
-        )
+        whisper_device, translation_device = _allocate_devices()
         self.whisper_device = whisper_device
         self.translation_device = translation_device
 
@@ -216,21 +204,20 @@ class TranscriptionEngine:
                 )
             else:
                 try:
-                    from whisperlivekit.translategemma import TranslateGemmaModel
-                except:
-                    raise Exception('TranslateGemma is not supported.')
+                    from whisperlivekit.translategemma import TranslateGemmaClient
+                except ImportError as exc:
+                    raise Exception(
+                        'TranslateGemma client requires httpx. '
+                        'Install it with `pip install httpx`.'
+                    ) from exc
                 translation_params = {"translation_model_size": "4b"}
                 translation_params = update_with_kwargs(translation_params, kwargs)
-                self.translation_model = TranslateGemmaModel(
+                self.translation_model = TranslateGemmaClient(
                     model_size=translation_params["translation_model_size"],
                     src_lang=self.args.lan,
-                    tgt_lang=self.args.target_language
+                    tgt_lang=self.args.target_language,
+                    base_url=getattr(self.args, "translategemma_url", None),
                 )
-
-        self.translation_dispatcher = None
-        if self.translation_model is not None and self.args.translation_model == "translategemma":
-            from whisperlivekit.translategemma import TranslationDispatcher
-            self.translation_dispatcher = TranslationDispatcher(self.translation_model)
 
         self.sat_model = None
         need_sat = self.args.sentence_detection or (

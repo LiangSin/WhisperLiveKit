@@ -19,6 +19,9 @@ Optional arguments:
   --target-lang     Target language for translation.
   --translation-model  Translation model: 'nllw' (default) or 'translategemma'.
   --translation-model-size  Model size string, e.g. '600M'/'1.3B' for nllw, '4b'/'12b'/'27b' for translategemma.
+  --translategemma-url  Base URL of the standalone TranslateGemma vLLM service (default: http://localhost:8765/v1).
+                        Only used when --translation-model translategemma is selected.
+                        See translate-gemma/README.md for how to launch the service.
   --sentence-detection  Enable SaT sentence boundary detection (requires pip install wtpsplit).
                         Automatically enabled when --translation-model translategemma is used.
   --bind      Bind host address
@@ -40,6 +43,7 @@ language=""
 target_language=""
 translation_model=""
 translation_model_size=""
+translategemma_url=""
 sentence_detection=0
 passthrough_args=()
 
@@ -95,6 +99,11 @@ while [[ $# -gt 0 ]]; do
       [[ $# -gt 0 ]] || usage
       translation_model_size="$1"
       ;;
+    --translategemma-url)
+      shift
+      [[ $# -gt 0 ]] || usage
+      translategemma_url="$1"
+      ;;
     --sentence-detection)
       sentence_detection=1
       ;;
@@ -142,6 +151,10 @@ fi
 
 if [[ -n "$translation_model_size" ]]; then
   cmd_args+=(--translation-model-size $translation_model_size)
+fi
+
+if [[ -n "$translategemma_url" ]]; then
+  cmd_args+=(--translategemma-url $translategemma_url)
 fi
 
 if [[ "$sentence_detection" -eq 1 ]]; then

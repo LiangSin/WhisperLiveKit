@@ -1,0 +1,53 @@
+# TranslateGemma — standalone vLLM service.
+#
+# Serves Infomaniak-AI/vllm-translategemma-${MODEL_SIZE}-it behind vLLM's
+# OpenAI-compatible HTTP API. vLLM performs continuous batching internally,
+# so multiple concurrent WhisperLiveKit connections share a single instance.
+#
+# Quick start:
+#   cp .env.example .env   # set HF_TOKEN, MODEL_SIZE, GPU, ports, ...
+#   docker compose up -d
+#   curl http://localhost:${PORT:-8765}/v1/models
+
+services:
+  translategemma:
+    image: vllm/vllm-openai:latest
+    container_name: translategemma
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/root/.cache/huggingface
+      - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+    ipc: host
+    ports:
+      - "${PORT:-8765}:8000"
+    command:
+      - --model
+      - Infomaniak-AI/vllm-translategemma-${MODEL_SIZE:-4b}-it
+      - --dtype
+      - bfloat16
+      - --max-model-len
+      - "${MAX_MODEL_LEN:-512}"
+      - --gpu-memory-utilization
+      - "${GPU_MEMORY_UTILIZATION:-0.85}"
+      - --max-num-seqs
+      - "${MAX_NUM_SEQS:-128}"
+      - --speculative-config
+      - '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4}'
+      - --enforce-eager
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status == 200 else 1)\""]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 120s

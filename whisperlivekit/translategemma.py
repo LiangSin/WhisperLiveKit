@@ -1,100 +1,152 @@
 """
-Google TranslateGemma integration.
+TranslateGemma client integration.
+
+The TranslateGemma model itself runs as a standalone vLLM service (see `translate-gemma/` at the repository root). 
+This module is the WhisperLiveKit-side client that talks to that service over HTTP API.
 
 Public surface:
-  - TranslateGemmaModel        — thin wrapper around the HF model
-  - TranslationDispatcher      — centralized batched queue (shared across connections)
+  - TranslateGemmaClient       — async HTTP client for the remote vLLM server
   - GemmaTranslationProcessor  — async pipeline stage (used by AudioProcessor)
 """
 
 import asyncio
 import logging
+import os
 import traceback
-import torch
 from typing import List, Optional
-
-from transformers import AutoModelForImageTextToText, AutoProcessor, AutoTokenizer
-from vllm import LLM, SamplingParams
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
+_MODEL_NAME_TEMPLATE = "Infomaniak-AI/vllm-translategemma-{size}-it"
+
+def _resolve_model_name(model_size: str, model_name: Optional[str]) -> str:
+    if model_name:
+        return model_name
+    return _MODEL_NAME_TEMPLATE.format(size=model_size.lower())
+
+
 # ---------------------------------------------------------------------------
-# Model wrapper
+# HTTP client
 # ---------------------------------------------------------------------------
 
-class TranslateGemmaModel:
+class TranslateGemmaClient:
     """
-    Loads and wraps a Infomaniak-AI/vllm-translategemma-*-it model for
-    sentence-level translation via vLLM with n-gram speculative decoding.
+    Async client for the standalone TranslateGemma (vLLM) service.
 
     Parameters
     ----------
     model_size:
-        HuggingFace model variant: "4b", "12b", or "27b".
-    src_lang:
-        BCP-47 source language code (e.g. "zh").
-    tgt_lang:
-        BCP-47 target language code (e.g. "en").
-    gpu_memory_utilization:
-        Fraction of GPU VRAM to allocate. Lower this if Whisper is on the
-        same GPU. Raise it if translation is on a dedicated GPU.
+        ``"4b"``/``"12b"``/``"27b"``. Used only to derive the default
+        ``model_name`` of ``Infomaniak-AI/vllm-translategemma-<size>-it``.
+    src_lang / tgt_lang:
+        BCP-47 language codes embedded in the prompt.
+    base_url:
+        OpenAI-compatible endpoint (``...//v1``). If unset, falls back to
+        the ``TRANSLATEGEMMA_URL`` env var, then to ``http://localhost:8765/v1``.
+    model_name:
+        Override the model name sent in requests. Defaults to the value
+        derived from ``model_size``.
+    api_key:
+        Bearer token for the remote server (vLLM accepts ``EMPTY`` by default).
+    timeout:
+        Per-request timeout in seconds.
+    max_tokens:
+        ``max_tokens`` field of each chat-completion request.
+    request_concurrency:
+        Soft cap on simultaneous in-flight requests from this client.
+        vLLM still does its own continuous batching upstream.
     """
 
-    def __init__(self, model_size: str = "4b", src_lang: str = "zh", tgt_lang: str = "en", gpu_memory_utilization: float = 0.65,):
+    def __init__(
+        self,
+        model_size: str = "4b",
+        src_lang: str = "zh",
+        tgt_lang: str = "en",
+        base_url: Optional[str] = None,
+        model_name: Optional[str] = None,
+        api_key: str = "EMPTY",
+        timeout: float = 60.0,
+        max_tokens: int = 128,
+        request_concurrency: int = 64,
+    ):
+        try:
+            import httpx  # noqa: F401
+        except ImportError as exc:
+            raise ImportError(
+                "httpx is required to talk to the TranslateGemma service. "
+                "Install it with `pip install httpx`."
+            ) from exc
+
         self.src_lang = src_lang
         self.tgt_lang = tgt_lang
-        self._load_model(model_size, gpu_memory_utilization)
+        self.base_url = base_url.rstrip("/")
+        self.model_name = _resolve_model_name(model_size, model_name)
+        self.api_key = api_key
+        self.timeout = timeout
+        self.max_tokens = max_tokens
+        self._semaphore = asyncio.Semaphore(request_concurrency)
+        self._client = None  # lazily created in the running event loop
+        self._client_lock = asyncio.Lock()
 
-        self.gen_kwargs = SamplingParams(
-            temperature=0,
-            max_tokens=128,
-            stop=["<eos>", "<end_of_turn>"],
+        logger.info(
+            "TranslateGemmaClient initialised: base_url=%s model=%s",
+            self.base_url, self.model_name,
         )
 
-    def _load_model(self, model_size: str, gpu_memory_utilization: float):
-        model_id = f"Infomaniak-AI/vllm-translategemma-{model_size.lower()}-it"
+    async def _get_client(self):
+        if self._client is None:
+            async with self._client_lock:
+                if self._client is None:
+                    import httpx
+                    self._client = httpx.AsyncClient(
+                        timeout=self.timeout,
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                    )
+        return self._client
 
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
+    async def aclose(self):
+        if self._client is not None:
+            try:
+                await self._client.aclose()
+            finally:
+                self._client = None
 
-        self.model = LLM(
-            model=model_id,
-            dtype="bfloat16",
-            max_model_len=512,
-            gpu_memory_utilization=gpu_memory_utilization,
-            speculative_config={
-                "method": "ngram",
-                "num_speculative_tokens": 5,
-                "prompt_lookup_max": 4,
-            },
-            enforce_eager=True,
-        )
-
-    def _build_prompt(self, text: str) -> str:
-        """Build a chat-template prompt for a single source text."""
-        messages = [{
+    def _build_messages(self, text: str):
+        return [{
             "role": "user",
             "content": (
                 f"<<<source>>>{self.src_lang}"
                 f"<<<target>>>{self.tgt_lang}"
                 f"<<<text>>>{text}"
-            )
+            ),
         }]
-        return self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True,
-        )
 
-    def translate(self, text: str) -> str:
-        """Translate *text* from src_lang to tgt_lang."""
+    async def translate(self, text: str) -> str:
+        """Translate *text* from src_lang to tgt_lang via the remote server."""
         text = (text or "").strip()
         if not text:
             return ""
-        inputs = self._build_prompt(text)
-        outputs = self.model.generate([inputs], self.gen_kwargs)
-        return outputs[0].outputs[0].text.strip()
 
-    def translate_batch(self, texts: List[str]) -> List[str]:
-        """Translate a list of texts in a single batched vLLM call."""
+        client = await self._get_client()
+        payload = {
+            "model": self.model_name,
+            "messages": self._build_messages(text),
+            "temperature": 0,
+            "max_tokens": self.max_tokens,
+            "stop": ["<eos>", "<end_of_turn>"],
+        }
+
+        async with self._semaphore:
+            response = await client.post(
+                f"{self.base_url}/chat/completions", json=payload,
+            )
+        response.raise_for_status()
+        data = response.json()
+        return data["choices"][0]["message"]["content"].strip()
+
+    async def translate_batch(self, texts: List[str]) -> List[str]:
+        """Translate *texts* concurrently. vLLM batches them on the server side."""
         cleaned = [(t or "").strip() for t in texts]
         results = [""] * len(cleaned)
 
@@ -103,118 +155,13 @@ class TranslateGemmaModel:
             return results
 
         indices, valid_texts = zip(*non_empty)
-        prompts = [self._build_prompt(t) for t in valid_texts]
-        outputs = self.model.generate(prompts, self.gen_kwargs)
-
-        for idx, output in zip(indices, outputs):
-            results[idx] = output.outputs[0].text.strip()
-
+        translations = await asyncio.gather(
+            *(self.translate(t) for t in valid_texts),
+            return_exceptions=False,
+        )
+        for idx, translation in zip(indices, translations):
+            results[idx] = translation
         return results
-
-
-# ---------------------------------------------------------------------------
-# Centralized batched dispatcher (shared across all connections)
-# ---------------------------------------------------------------------------
-
-class TranslationDispatcher:
-    """
-    Collects translation requests from all connections, batches them, and
-    calls translate_batch() once per batch for efficient GPU utilization.
-
-    Parameters
-    ----------
-    gemma_model:
-        A loaded ``TranslateGemmaModel``.
-    max_batch_wait:
-        Maximum seconds to wait for additional requests before dispatching
-        a batch.  Keep low for real-time responsiveness.
-    max_batch_size:
-        Upper limit on prompts per vLLM generate() call.
-    """
-
-    def __init__(
-        self,
-        gemma_model: TranslateGemmaModel,
-        max_batch_wait: float = 0.05,
-        max_batch_size: int = 32,
-    ):
-        self.gemma_model = gemma_model
-        self.max_batch_wait = max_batch_wait
-        self.max_batch_size = max_batch_size
-        self._queue: asyncio.Queue = asyncio.Queue()
-        self._task: Optional[asyncio.Task] = None
-        self._start_lock = asyncio.Lock()
-
-    async def ensure_started(self):
-        """Start the dispatch loop if it is not already running."""
-        async with self._start_lock:
-            if self._task is None or self._task.done():
-                self._task = asyncio.create_task(self._dispatch_loop())
-
-    async def translate(self, text: str) -> str:
-        """Submit a single text and await the translation result."""
-        loop = asyncio.get_running_loop()
-        future = loop.create_future()
-        await self._queue.put((text, future))
-        return await future
-
-    async def _dispatch_loop(self):
-        """Drain the queue, batch requests, translate, distribute results."""
-        logger.info("TranslationDispatcher: dispatch loop started.")
-        try:
-            while True:
-                batch_texts: List[str] = []
-                batch_futures: List[asyncio.Future] = []
-
-                text, future = await self._queue.get()
-                batch_texts.append(text)
-                batch_futures.append(future)
-
-                deadline = asyncio.get_event_loop().time() + self.max_batch_wait
-                while len(batch_texts) < self.max_batch_size:
-                    remaining = deadline - asyncio.get_event_loop().time()
-                    if remaining <= 0:
-                        break
-                    try:
-                        text, future = await asyncio.wait_for(
-                            self._queue.get(), timeout=remaining,
-                        )
-                        batch_texts.append(text)
-                        batch_futures.append(future)
-                    except asyncio.TimeoutError:
-                        break
-
-                logger.debug(
-                    "TranslationDispatcher: dispatching batch of %d request(s).",
-                    len(batch_texts),
-                )
-
-                try:
-                    results = await asyncio.to_thread(
-                        self.gemma_model.translate_batch, batch_texts,
-                    )
-                    for fut, result in zip(batch_futures, results):
-                        if not fut.done():
-                            fut.set_result(result)
-                except Exception as exc:
-                    logger.warning("TranslationDispatcher batch error: %s", exc)
-                    for fut in batch_futures:
-                        if not fut.done():
-                            fut.set_exception(exc)
-
-        except asyncio.CancelledError:
-            logger.info(
-                "TranslationDispatcher: dispatch loop cancelled, "
-                "resolving %d pending future(s).", self._queue.qsize(),
-            )
-            while not self._queue.empty():
-                try:
-                    _, future = self._queue.get_nowait()
-                    if not future.done():
-                        future.cancel()
-                except asyncio.QueueEmpty:
-                    break
-            raise
 
 
 # ---------------------------------------------------------------------------
@@ -224,13 +171,13 @@ class TranslationDispatcher:
 class GemmaTranslationProcessor:
     """
     Per-connection consumer: drains sentences from ``translation_sentence_queue``, 
-    submits them to the shared ``TranslationDispatcher``,
+    submits them to the shared ``TranslateGemmaClient``,
     and stores results in ``state.translation_validated_segments``.
 
     Parameters
     ----------
-    dispatcher:
-        The shared ``TranslationDispatcher``.
+    client:
+        The shared ``TranslateGemmaClient``.
     translation_sentence_queue:
         Queue of (Sentence, is_pending: bool) tuples to translate.
     state:
@@ -243,13 +190,13 @@ class GemmaTranslationProcessor:
 
     def __init__(
         self,
-        dispatcher: TranslationDispatcher,
+        client: TranslateGemmaClient,
         translation_sentence_queue: asyncio.Queue,
         state,
         lock: asyncio.Lock,
         sentinel: object,
     ):
-        self.dispatcher = dispatcher
+        self.client = client
         self.translation_sentence_queue = translation_sentence_queue
         self.state = state
         self.lock = lock
@@ -258,8 +205,6 @@ class GemmaTranslationProcessor:
     async def run(self):
         """Main processing loop — run as an asyncio.Task."""
         from whisperlivekit.timed_objects import Translation
-
-        await self.dispatcher.ensure_started()
 
         while True:
             try:
@@ -297,7 +242,7 @@ class GemmaTranslationProcessor:
                 if sentences:
                     try:
                         results = await asyncio.gather(
-                            *[self.dispatcher.translate(s.text) for s in sentences]
+                            *[self.client.translate(s.text) for s in sentences]
                         )
                         translations = [
                             Translation(
@@ -339,5 +284,11 @@ class GemmaTranslationProcessor:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    model = TranslateGemmaModel(model_size="4b", src_lang="zh", tgt_lang="en")
-    print(model.translate("你好，最近怎麼樣？"))
+    async def _smoke_test():
+        client = TranslateGemmaClient(model_size="4b", src_lang="zh", tgt_lang="en")
+        try:
+            print(await client.translate("你好，最近怎麼樣？"))
+        finally:
+            await client.aclose()
+
+    asyncio.run(_smoke_test())

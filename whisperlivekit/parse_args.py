@@ -340,6 +340,19 @@ def parse_args():
         help="Translation model: nllw or translategemma.",
     )
 
+    simulstreaming_group.add_argument(
+        "--translategemma-url",
+        type=str,
+        default=None,
+        dest="translategemma_url",
+        default="http://localhost:8765/v1",
+        help=(
+            "Base URL of the standalone TranslateGemma vLLM service. "
+            "Defaults to http://localhost:8765/v1. "
+            "Only used with --translation-model translategemma."
+        ),
+    )
+
     parser.add_argument(
         "--sentence-detection",
         action="store_true",
