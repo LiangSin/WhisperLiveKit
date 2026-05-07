@@ -1,0 +1,53 @@
+# Top-level compose file — orchestrates both WhisperLiveKit and TranslateGemma.
+#
+# Quick start:
+#   cp .env.example .env                 # edit WLK_* and COOL_WHISPER_MODEL_DIR
+#   cp translate-gemma/.env.example translate-gemma/.env
+#   docker compose up                    # start both services
+#   docker compose up whisperlivekit     # start only WhisperLiveKit
+#   docker compose up translategemma     # start only TranslateGemma
+
+include:
+  - translate-gemma/docker-compose.yml
+
+services:
+  whisperlivekit:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        COOL_WHISPER_SNAPSHOT_DIR: ${COOL_WHISPER_SNAPSHOT_DIR}
+    image: whisperlivekit:local
+    container_name: whisperlivekit
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      - CUDA_DEVICE_ORDER=PCI_BUS_ID
+      - CUDA_VISIBLE_DEVICES=${WLK_CUDA_VISIBLE_DEVICES:-0}
+    volumes:
+      - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ./ssl-config:/app/ssl-config:ro
+      - ./archives:/app/archives
+    ports:
+      - "${WLK_PORT:-8000}:8000"
+    command: >-
+      --host 0.0.0.0
+      --port 8000
+      --model-path ${WLK_MODEL_PATH:-models/cool-whisper}
+      --vac-backend ${WLK_VAC_BACKEND:-ten-vad}
+      --language ${WLK_LANGUAGE:-zh}
+      --translation-model ${WLK_TRANSLATION_MODEL:-translategemma}
+      --translation-model-size ${WLK_TRANSLATION_MODEL_SIZE:-4b}
+      --translategemma-url ${WLK_TRANSLATEGEMMA_URL:-http://translategemma:8000/v1}
+      ${WLK_TARGET_LANGUAGE_ARG:-}
+      ${WLK_SENTENCE_DETECTION_FLAG:-}
+      ${WLK_ALLOWED_IPS_ARG:-}
+      ${WLK_ALLOWED_NETWORKS_ARG:-}
+      ${WLK_SSL_ARGS:-}
+      ${WLK_OPTIONAL_FLAGS:-}

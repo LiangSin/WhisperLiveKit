@@ -28,8 +28,8 @@ services:
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
     ipc: host
-    ports:
-      - "${PORT:-8765}:8000"
+    # ports:
+    #   - "${PORT:-8765}:8000"
     command:
       - --model
       - Infomaniak-AI/vllm-translategemma-${MODEL_SIZE:-4b}-it
@@ -44,7 +44,6 @@ services:
       - --speculative-config
       - '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4}'
       - --enforce-eager
-    restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status == 200 else 1)\""]
       interval: 30s
