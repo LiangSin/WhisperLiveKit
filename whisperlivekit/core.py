@@ -2,6 +2,7 @@ from whisperlivekit.local_agreement.whisper_online import backend_factory
 from whisperlivekit.simul_whisper import SimulStreamingASR
 from whisperlivekit.local_agreement.online_asr import OnlineASRProcessor
 from argparse import Namespace
+import os
 import sys
 import logging
 
@@ -212,11 +213,14 @@ class TranscriptionEngine:
                     ) from exc
                 translation_params = {"translation_model_size": "4b"}
                 translation_params = update_with_kwargs(translation_params, kwargs)
+                raw_vllm_api_key = os.getenv("VLLM_API_KEY")
+                vllm_api_key = (raw_vllm_api_key or "").strip() or "EMPTY"
                 self.translation_model = TranslateGemmaClient(
                     model_size=translation_params["translation_model_size"],
                     src_lang=self.args.lan,
                     tgt_lang=self.args.target_language,
                     base_url=getattr(self.args, "translategemma_url", None),
+                    api_key=vllm_api_key,
                 )
 
         self.sat_model = None

@@ -30,6 +30,7 @@ services:
     environment:
       - CUDA_DEVICE_ORDER=PCI_BUS_ID
       - CUDA_VISIBLE_DEVICES=${WLK_CUDA_VISIBLE_DEVICES:-0}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - ./ssl-config:/app/ssl-config:ro

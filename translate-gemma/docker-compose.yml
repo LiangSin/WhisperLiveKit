@@ -25,6 +25,7 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/root/.cache/huggingface
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
+      - VLLM_API_KEY=${VLLM_API_KEY:-}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
     ipc: host
@@ -44,6 +45,8 @@ services:
       - --speculative-config
       - '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4}'
       - --enforce-eager
+      - --api-key
+      - "${VLLM_API_KEY:-}"
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8000/health', timeout=2).status == 200 else 1)\""]
       interval: 30s
