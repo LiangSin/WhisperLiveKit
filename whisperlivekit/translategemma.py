@@ -2,7 +2,7 @@
 TranslateGemma client integration.
 
 The TranslateGemma model itself runs as a standalone vLLM service (see `translate-gemma/` at the repository root). 
-This module is the WhisperLiveKit-side client that talks to that service over HTTP API.
+This module is the WhisperLiveKit-side client that talks to that service over HTTPS API.
 
 Public surface:
   - TranslateGemmaClient       — async HTTP client for the remote vLLM server
@@ -27,7 +27,7 @@ def _resolve_model_name(model_size: str, model_name: Optional[str]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# HTTP client
+# HTTPS client
 # ---------------------------------------------------------------------------
 
 class TranslateGemmaClient:
@@ -43,7 +43,7 @@ class TranslateGemmaClient:
         BCP-47 language codes embedded in the prompt.
     base_url:
         OpenAI-compatible endpoint (``...//v1``). If unset, falls back to
-        the ``TRANSLATEGEMMA_URL`` env var, then to ``http://localhost:8765/v1``.
+        the ``TRANSLATEGEMMA_URL`` env var, then to ``https://localhost:8765/v1``.
     model_name:
         Override the model name sent in requests. Defaults to the value
         derived from ``model_size``.
@@ -56,6 +56,8 @@ class TranslateGemmaClient:
     request_concurrency:
         Soft cap on simultaneous in-flight requests from this client.
         vLLM still does its own continuous batching upstream.
+    ssl_verify:
+        Whether httpx verifies the TranslateGemma HTTPS certificate.
     """
 
     def __init__(
@@ -69,6 +71,7 @@ class TranslateGemmaClient:
         timeout: float = 60.0,
         max_tokens: int = 128,
         request_concurrency: int = 64,
+        ssl_verify: bool = True,
     ):
         try:
             import httpx  # noqa: F401
@@ -85,6 +88,7 @@ class TranslateGemmaClient:
         self.api_key = api_key
         self.timeout = timeout
         self.max_tokens = max_tokens
+        self.ssl_verify = ssl_verify
         self._semaphore = asyncio.Semaphore(request_concurrency)
         self._client = None  # lazily created in the running event loop
         self._client_lock = asyncio.Lock()
@@ -101,6 +105,7 @@ class TranslateGemmaClient:
                     import httpx
                     self._client = httpx.AsyncClient(
                         timeout=self.timeout,
+                        verify=self.ssl_verify,
                         headers={"Authorization": f"Bearer {self.api_key}"},
                     )
         return self._client
@@ -285,7 +290,7 @@ class GemmaTranslationProcessor:
 
 if __name__ == "__main__":
     async def _smoke_test():
-        client = TranslateGemmaClient(model_size="4b", src_lang="zh", tgt_lang="en", base_url="http://localhost:8765/v1")
+        client = TranslateGemmaClient(model_size="4b", src_lang="zh", tgt_lang="en", base_url="https://localhost:8765/v1")
         try:
             print(await client.translate("你好，最近怎麼樣？"))
         finally:

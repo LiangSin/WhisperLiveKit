@@ -344,10 +344,10 @@ def parse_args():
         "--translategemma-url",
         type=str,
         dest="translategemma_url",
-        default="http://localhost:8765/v1",
+        default="https://localhost:8765/v1",
         help=(
             "Base URL of the standalone TranslateGemma vLLM service. "
-            "Defaults to http://localhost:8765/v1. "
+            "Defaults to https://localhost:8765/v1. "
             "Only used with --translation-model translategemma."
         ),
     )

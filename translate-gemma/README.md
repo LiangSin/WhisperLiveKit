@@ -1,20 +1,20 @@
 # TranslateGemma — standalone service
 
 Runs an `Infomaniak-AI/vllm-translategemma-*-it` model behind vLLM's
-OpenAI-compatible HTTP API in its own container, decoupled from
+OpenAI-compatible HTTPS API in its own container, decoupled from
 WhisperLiveKit. vLLM's continuous-batching engine multiplexes requests
 across all connected clients on the GPU.
 
-WhisperLiveKit talks to it via plain HTTP — pass
-`--translategemma-url http://<host>:<port>/v1` (default
-`http://localhost:8765/v1`) on the WhisperLiveKit side.
+WhisperLiveKit talks to it via HTTPS — pass
+`--translategemma-url https://<host>:<port>/v1` (default
+`https://localhost:8765/v1`) on the WhisperLiveKit side.
 
 ## Quick start (Docker Compose)
 
 ```bash
 cp .env.example .env       # edit HF_TOKEN, MODEL_SIZE, GPU, port, ...
 docker compose up -d
-curl http://localhost:8765/v1/models
+curl -k https://localhost:8765/v1/models
 ```
 
 ## Configuration
@@ -31,11 +31,12 @@ Configuration lives in `.env` (see `.env.example`):
 | `GPU_MEMORY_UTILIZATION` | `0.85` | vLLM `--gpu-memory-utilization`. |
 | `MAX_NUM_SEQS` | `128` | vLLM `--max-num-seqs` (concurrency cap). |
 | `HF_CACHE_DIR` | `~/.cache/huggingface` | Path on the host where model weights are cached. |
+| `SSL_CONFIG_DIR` | `../ssl-config` | Host directory containing TLS certs mounted into the container. |
 
 ## Quick smoke test
 
 ```bash
-curl http://localhost:8765/v1/chat/completions \
+curl -k https://localhost:8765/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "Infomaniak-AI/vllm-translategemma-4b-it",

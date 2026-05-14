@@ -1,13 +1,13 @@
 # TranslateGemma — standalone vLLM service.
 #
 # Serves Infomaniak-AI/vllm-translategemma-${MODEL_SIZE}-it behind vLLM's
-# OpenAI-compatible HTTP API. vLLM performs continuous batching internally,
+# OpenAI-compatible HTTPS API. vLLM performs continuous batching internally,
 # so multiple concurrent WhisperLiveKit connections share a single instance.
 #
 # Quick start:
 #   cp .env.example .env   # set HF_TOKEN, MODEL_SIZE, GPU, ports, ...
 #   docker compose up -d
-#   curl http://localhost:${PORT:-8765}/v1/models
+#   curl -k https://localhost:${PORT:-8765}/v1/models
 
 services:
   translategemma:
@@ -28,6 +28,7 @@ services:
       - VLLM_API_KEY=${VLLM_API_KEY:-}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
+      - ${SSL_CONFIG_DIR:-../ssl-config}:/app/ssl-config:ro
     ipc: host
     # ports:
     #   - "${PORT:-8765}:8000"
@@ -47,8 +48,12 @@ services:
       - --enforce-eager
       - --api-key
       - "${VLLM_API_KEY:-}"
+      - --ssl-certfile
+      - "/app/ssl-config/cert.pem"
+      - --ssl-keyfile
+      - "/app/ssl-config/key.pem"
     healthcheck:
-      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      test: ["CMD-SHELL", "curl -kf https://localhost:8000/health || exit 1"]
       interval: 30s
       timeout: 5s
       retries: 5

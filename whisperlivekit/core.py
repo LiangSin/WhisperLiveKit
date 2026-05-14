@@ -215,12 +215,15 @@ class TranscriptionEngine:
                 translation_params = update_with_kwargs(translation_params, kwargs)
                 raw_vllm_api_key = os.getenv("VLLM_API_KEY")
                 vllm_api_key = (raw_vllm_api_key or "").strip() or "EMPTY"
+                raw_ssl_verify = os.getenv("TRANSLATEGEMMA_SSL_VERIFY", "true")
+                translategemma_ssl_verify = raw_ssl_verify.strip().lower() not in ("0", "false", "no", "off")
                 self.translation_model = TranslateGemmaClient(
                     model_size=translation_params["translation_model_size"],
                     src_lang=self.args.lan,
                     tgt_lang=self.args.target_language,
                     base_url=getattr(self.args, "translategemma_url", None),
                     api_key=vllm_api_key,
+                    ssl_verify=translategemma_ssl_verify,
                 )
 
         self.sat_model = None

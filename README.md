@@ -170,7 +170,7 @@ async def websocket_endpoint(websocket: WebSocket):
 | `--target-language` | Target language code for translation. Required to enable translation. | `` |
 | `--translation-model` | Translation backend: `nllw` (streaming, 200 languages) or `translategemma` (sentence-level, Google TranslateGemma). `translategemma` automatically enables sentence detection. | `nllw` |
 | `--translation-model-size` | Model size: `600M`/`1.3B` for NLLW; `4b`/`12b`/`27b` for TranslateGemma. | `600M` |
-| `--translategemma-url` | OpenAI-compatible endpoint of the standalone TranslateGemma vLLM service (see [`translate-gemma/`](./translate-gemma/)). Falls back to the `TRANSLATEGEMMA_URL` env var. Only used with `--translation-model translategemma`. | `http://localhost:8765/v1` |
+| `--translategemma-url` | OpenAI-compatible endpoint of the standalone TranslateGemma vLLM service (see [`translate-gemma/`](./translate-gemma/)). Falls back to the `TRANSLATEGEMMA_URL` env var. Only used with `--translation-model translategemma`. | `https://localhost:8765/v1` |
 | `--nllb-backend` | NLLW inference backend: `transformers` or `ctranslate2`. | `transformers` |
 | `--sentence-detection` | Enable SaT-based sentence boundary detection on validated transcription. Sentences are sent to clients as a `sentences` field (`[{text, start, end}, …]`). Requires `pip install wtpsplit`. Automatically enabled with `--translation-model translategemma`. | `False` |
 
