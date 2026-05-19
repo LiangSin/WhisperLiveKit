@@ -30,6 +30,8 @@ services:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - ${SSL_CONFIG_DIR:-../ssl-config}:/app/ssl-config:ro
     ipc: host
+    depends_on:
+      - tg-monitor-client
     # ports:
     #   - "${PORT:-8765}:8000"
     command:
@@ -58,3 +60,15 @@ services:
       timeout: 5s
       retries: 5
       start_period: 120s
+
+  tg-monitor-client:
+    build:
+      context: ../monitor-client
+    image: wlk-monitor-client:local
+    container_name: tg-monitor-client
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ../monitor-client/probes_tg.json:/app/probes.json:ro
+    env_file:
+      - ../monitor-client/.env
+    restart: unless-stopped

@@ -1,0 +1,7 @@
+{
+  "_comment": "Keys must exactly match the names registered in monitor_service/monitor_config.json.",
+
+  "WhisperLiveKit": {
+    "container": "whisperlivekit"
+  }
+}

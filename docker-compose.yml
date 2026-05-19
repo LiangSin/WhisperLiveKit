@@ -38,6 +38,8 @@ services:
       - ./archives:/app/archives
     ports:
       - "${WLK_PORT:-8000}:8000"
+    depends_on:
+      - wlk-monitor-client
     command: >-
       --host 0.0.0.0
       --port 8000
@@ -53,3 +55,15 @@ services:
       ${WLK_ALLOWED_NETWORKS_ARG:-}
       ${WLK_SSL_ARGS:-}
       ${WLK_OPTIONAL_FLAGS:-}
+
+  wlk-monitor-client:
+    build:
+      context: ./monitor-client
+    image: wlk-monitor-client:local
+    container_name: wlk-monitor-client
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./monitor-client/probes_wlk.json:/app/probes.json:ro
+    env_file:
+      - ./monitor-client/.env
+    restart: unless-stopped
