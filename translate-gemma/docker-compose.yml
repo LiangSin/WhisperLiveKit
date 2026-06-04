@@ -32,8 +32,8 @@ services:
     ipc: host
     depends_on:
       - tg-monitor-client
-    # ports:
-    #   - "${PORT:-8765}:8000"
+    ports:
+      - "${PORT:-8765}:8000"
     command:
       - --model
       - Infomaniak-AI/vllm-translategemma-${MODEL_SIZE:-4b}-it
