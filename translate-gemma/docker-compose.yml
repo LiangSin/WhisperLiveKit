@@ -11,7 +11,10 @@
 
 services:
   translategemma:
-    image: vllm/vllm-openai:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: translategemma:local
     container_name: translategemma
     runtime: nvidia
     deploy:
@@ -26,12 +29,14 @@ services:
       - HF_HOME=/root/.cache/huggingface
       - CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0}
       - VLLM_API_KEY=${VLLM_API_KEY:-}
+      - MONITOR_ENABLED=${TG_MONITOR_ENABLED:-true}
+      - MONITOR_URL=${MONITOR_URL:-}
+      - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY:-}
+      - MONITOR_SERVICE_NAME=${TG_MONITOR_SERVICE_NAME:-TranslateGemma}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - ${SSL_CONFIG_DIR:-../ssl-config}:/app/ssl-config:ro
     ipc: host
-    depends_on:
-      - tg-monitor-client
     ports:
       - "${PORT:-8765}:8000"
     command:
@@ -60,15 +65,3 @@ services:
       timeout: 5s
       retries: 5
       start_period: 120s
-
-  tg-monitor-client:
-    build:
-      context: ../monitor-client
-    image: wlk-monitor-client:local
-    container_name: tg-monitor-client
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ../monitor-client/probes_tg.json:/app/probes.json:ro
-    env_file:
-      - ../monitor-client/.env
-    restart: unless-stopped
