@@ -87,6 +87,9 @@ class IPRestrictionMiddleware:
         """
         Middleware call function.
         """
+        if request.url.path == "/health":
+            return await call_next(request)
+
         # Get client IP - handle both direct connections and proxies
         client_ip = None
 

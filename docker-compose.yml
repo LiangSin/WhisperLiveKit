@@ -36,8 +36,6 @@ services:
       - MONITOR_URL=${MONITOR_URL:-}
       - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY:-}
       - MONITOR_SERVICE_NAME=${WLK_MONITOR_SERVICE_NAME:-WhisperLiveKit}
-      - MONITOR_HEALTH_URL=${WLK_MONITOR_HEALTH_URL:-}
-      - MONITOR_HEALTH_VERIFY_SSL=${WLK_MONITOR_HEALTH_VERIFY_SSL:-}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - ./ssl-config:/app/ssl-config:ro

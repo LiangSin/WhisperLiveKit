@@ -31,21 +31,6 @@ def _has_arg(args: list[str], flag: str) -> bool:
     return any(value == flag or value.startswith(prefix) for value in args)
 
 
-def _monitor_env(server_pid: int, server_args: list[str]) -> dict[str, str]:
-    env = os.environ.copy()
-    env["MONITOR_TARGET_PID"] = str(server_pid)
-
-    if not env.get("MONITOR_HEALTH_URL"):
-        port = _arg_value(server_args, "--port", "8000")
-        scheme = "https" if _has_arg(server_args, "--ssl-certfile") else "http"
-        env["MONITOR_HEALTH_URL"] = f"{scheme}://127.0.0.1:{port}/"
-
-    if env["MONITOR_HEALTH_URL"].startswith("https://") and not env.get("MONITOR_HEALTH_VERIFY_SSL"):
-        env["MONITOR_HEALTH_VERIFY_SSL"] = "false"
-
-    return env
-
-
 def _terminate(process: subprocess.Popen[bytes], timeout: float = 10.0) -> None:
     if process.poll() is not None:
         return
@@ -71,9 +56,19 @@ def main() -> int:
         "off",
     )
     if monitor_enabled:
+        port = _arg_value(server_args, "--port", "8000")
+        scheme = "https" if _has_arg(server_args, "--ssl-certfile") else "http"
         monitor = subprocess.Popen(
-            [sys.executable, str(MONITOR_CLIENT)],
-            env=_monitor_env(server.pid, server_args),
+            [
+                sys.executable,
+                str(MONITOR_CLIENT),
+                "--server-pid",
+                str(server.pid),
+                "--server-port",
+                str(port),
+                "--server-scheme",
+                scheme,
+            ],
         )
 
     stopping = False

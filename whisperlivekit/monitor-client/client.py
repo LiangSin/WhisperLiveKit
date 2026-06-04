@@ -1,13 +1,13 @@
 """
 In-container monitor client for WhisperLiveKit.
 
-The old monitor container inspected Docker Compose state. This version runs
-inside the WhisperLiveKit container and reports the same upstream payload based
-on the local server process plus an optional HTTP probe.
+This monitor client runs inside the WhisperLiveKit container and reports 
+the upstream payload based on the local server process and the /health endpoint.
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import logging
 import os
@@ -17,7 +17,6 @@ import ssl
 import time
 from threading import Event
 from http.client import HTTPResponse
-from typing import Optional
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -32,16 +31,8 @@ STARTUP_GRACE_SECONDS = 10
 
 SERVICE_NAME = os.getenv("MONITOR_SERVICE_NAME", "WhisperLiveKit")
 SOURCE = socket.gethostname()
-SERVER_PID = int(os.getenv("MONITOR_TARGET_PID", "0") or "0")
-HEALTH_URL = os.getenv("MONITOR_HEALTH_URL", "")
-HEALTH_EXPECTED_STATUS = int(os.getenv("MONITOR_HEALTH_EXPECTED_STATUS", "200"))
-HEALTH_TIMEOUT = float(os.getenv("MONITOR_HEALTH_TIMEOUT", "5"))
-HEALTH_VERIFY_SSL = os.getenv("MONITOR_HEALTH_VERIFY_SSL", "true").strip().lower() not in (
-    "0",
-    "false",
-    "no",
-    "off",
-)
+HEALTH_TIMEOUT = 5.0
+HEALTH_EXPECTED_STATUS = 200
 
 
 def process_running(pid: int) -> bool:
@@ -56,41 +47,50 @@ def process_running(pid: int) -> bool:
     return True
 
 
-def _ssl_context() -> Optional[ssl.SSLContext]:
-    if HEALTH_VERIFY_SSL:
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Embedded WhisperLiveKit monitor client")
+    parser.add_argument("--server-pid", type=int, default=0)
+    parser.add_argument("--server-port", type=int, default=8000)
+    parser.add_argument("--server-scheme", choices=["http", "https"], default="http")
+    return parser.parse_args()
+
+
+def health_url(server_scheme: str, server_port: int) -> str:
+    return f"{server_scheme}://127.0.0.1:{server_port}/health"
+
+
+def _ssl_context(server_scheme: str) -> ssl.SSLContext | None:
+    if server_scheme != "https":
         return None
     return ssl._create_unverified_context()
 
 
-def http_probe() -> Optional[bool]:
-    """Return True/False for configured HTTP probe, or None when disabled."""
-    if not HEALTH_URL:
-        return None
-
+def http_probe(url: str, server_scheme: str) -> bool:
+    """Return True when the fixed local /health endpoint responds correctly."""
     try:
         response: HTTPResponse
-        with urlopen(HEALTH_URL, timeout=HEALTH_TIMEOUT, context=_ssl_context()) as response:
+        with urlopen(url, timeout=HEALTH_TIMEOUT, context=_ssl_context(server_scheme)) as response:
             if response.status == HEALTH_EXPECTED_STATUS:
                 return True
             logger.debug(
                 "HTTP probe %s returned HTTP %d, expected %d",
-                HEALTH_URL,
+                url,
                 response.status,
                 HEALTH_EXPECTED_STATUS,
             )
             return False
     except HTTPError as exc:
-        logger.debug("HTTP probe %s returned HTTP %d", HEALTH_URL, exc.code)
+        logger.debug("HTTP probe %s returned HTTP %d", url, exc.code)
         return False
     except (OSError, URLError) as exc:
-        logger.debug("HTTP probe %s failed: %s", HEALTH_URL, exc)
+        logger.debug("HTTP probe %s failed: %s", url, exc)
         return False
 
 
-def resolve_status(running: bool, probe_ok: Optional[bool]) -> str:
+def resolve_status(running: bool, probe_ok: bool) -> str:
     if not running:
         return "down"
-    if probe_ok is False:
+    if not probe_ok:
         return "degraded"
     return "up"
 
@@ -125,22 +125,23 @@ def push(status: str) -> None:
         logger.error("Failed to push %r: %s", SERVICE_NAME, exc)
 
 
-def run_cycle() -> None:
-    running = process_running(SERVER_PID)
-    probe_ok = http_probe() if running else None
+def run_cycle(server_pid: int, url: str, server_scheme: str) -> None:
+    running = process_running(server_pid)
+    probe_ok = http_probe(url, server_scheme) if running else False
     push(resolve_status(running, probe_ok))
 
 
 def main() -> None:
+    args = parse_args()
+    url = health_url(args.server_scheme, args.server_port)
     logger.info(
-        "monitor_client starting - target=%s interval=%ds source=%s service=%s",
+        "monitor_client starting - target=%s interval=%ds source=%s service=%s probe=%s",
         MONITOR_URL,
         POLL_INTERVAL,
         SOURCE,
         SERVICE_NAME,
+        url,
     )
-    if HEALTH_URL:
-        logger.info("HTTP probe enabled - url=%s", HEALTH_URL)
 
     logger.info("Waiting %d s before first check", STARTUP_GRACE_SECONDS)
     time.sleep(STARTUP_GRACE_SECONDS)
@@ -155,7 +156,7 @@ def main() -> None:
 
     while not stop_event.is_set():
         try:
-            run_cycle()
+            run_cycle(args.server_pid, url, args.server_scheme)
         except Exception as exc:
             logger.error("Unexpected error in cycle: %s", exc)
         stop_event.wait(POLL_INTERVAL)

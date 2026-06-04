@@ -61,6 +61,9 @@ if args.allowed_ips or args.allowed_networks:
 async def get():
     return HTMLResponse(get_inline_ui_html())
 
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
 
 async def handle_websocket_results(websocket, results_generator):
     """Consumes results from the audio processor and sends them via WebSocket."""
