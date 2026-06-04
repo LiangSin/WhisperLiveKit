@@ -32,14 +32,18 @@ services:
       - CUDA_VISIBLE_DEVICES=${WLK_CUDA_VISIBLE_DEVICES:-0}
       - VLLM_API_KEY=${VLLM_API_KEY:-}
       - TRANSLATEGEMMA_SSL_VERIFY=${TRANSLATEGEMMA_SSL_VERIFY:-false}
+      - MONITOR_ENABLED=${WLK_MONITOR_ENABLED:-true}
+      - MONITOR_URL=${MONITOR_URL:-}
+      - MONITOR_SECRET_KEY=${MONITOR_SECRET_KEY:-}
+      - MONITOR_SERVICE_NAME=${WLK_MONITOR_SERVICE_NAME:-WhisperLiveKit}
+      - MONITOR_HEALTH_URL=${WLK_MONITOR_HEALTH_URL:-}
+      - MONITOR_HEALTH_VERIFY_SSL=${WLK_MONITOR_HEALTH_VERIFY_SSL:-}
     volumes:
       - ${HF_CACHE_DIR:-~/.cache/huggingface}:/root/.cache/huggingface
       - ./ssl-config:/app/ssl-config:ro
       - ./archives:/app/archives
     ports:
       - "${WLK_PORT:-8000}:8000"
-    depends_on:
-      - wlk-monitor-client
     command: >-
       --host 0.0.0.0
       --port 8000
@@ -55,15 +59,3 @@ services:
       ${WLK_ALLOWED_NETWORKS_ARG:-}
       ${WLK_SSL_ARGS:-}
       ${WLK_OPTIONAL_FLAGS:-}
-
-  wlk-monitor-client:
-    build:
-      context: ./monitor-client
-    image: wlk-monitor-client:local
-    container_name: wlk-monitor-client
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./monitor-client/probes_wlk.json:/app/probes.json:ro
-    env_file:
-      - ./monitor-client/.env
-    restart: unless-stopped

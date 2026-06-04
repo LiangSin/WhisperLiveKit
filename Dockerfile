@@ -56,4 +56,4 @@ RUN mkdir -p /app/models /app/archives /app/ssl-config && \
 
 EXPOSE 8000
 
-ENTRYPOINT ["whisperlivekit-server"]
+ENTRYPOINT ["python3", "/app/whisperlivekit/monitor-client/entrypoint.py"]
