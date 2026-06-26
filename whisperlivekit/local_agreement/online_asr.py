@@ -224,6 +224,8 @@ class OnlineASRProcessor:
         self.transcript_buffer.insert(tokens, self.buffer_time_offset)
         committed_tokens = self.transcript_buffer.flush()
         self.committed.extend(committed_tokens)
+        if len(self.committed) > 1000:
+            self.committed = self.committed[-500:]
 
         if committed_tokens:
             self.time_of_last_asr_output = self.committed[-1].end

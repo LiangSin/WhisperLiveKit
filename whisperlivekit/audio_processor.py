@@ -20,6 +20,9 @@ logger.setLevel(logging.DEBUG)
 SENTINEL = object() # unique sentinel object for end of stream marker
 HALLUCINATION_RESET = object()  # signals SaT/Gemma to clear state when hallucination detected
 
+_TOKENS_TRIM_THRESHOLD = 1500
+_TOKENS_KEEP = 1000
+
 def cut_at(cumulative_pcm, cut_sec):
     cumulative_len = 0
     cut_sample = int(cut_sec * 16000)
@@ -258,6 +261,18 @@ class AudioProcessor:
                 text=".", speaker=-1, is_dummy=True
             ))
             
+    def _trim_state_tokens_locked(self):
+        """Remove old tokens to prevent unbounded growth. Caller must hold self.lock."""
+        n = len(self.state.tokens)
+        if n <= _TOKENS_TRIM_THRESHOLD:
+            return
+        excess = n - _TOKENS_KEEP
+        self.state.tokens = self.state.tokens[excess:]
+        self.state.last_validated_token = max(0, self.state.last_validated_token - excess)
+        if self.state.last_punctuation_index is not None:
+            self.state.last_punctuation_index = max(0, self.state.last_punctuation_index - excess)
+        logger.debug("Trimmed %d old tokens, keeping %d", excess, _TOKENS_KEEP)
+
     async def get_current_state(self):
         """Get current state."""
         async with self.lock:
@@ -472,7 +487,8 @@ class AudioProcessor:
                     self.state.tokens.extend(new_tokens)
                     self.state.buffer_transcription = _buffer_transcript
                     self.state.end_buffer = max(candidate_end_times)
-                
+                    self._trim_state_tokens_locked()
+
                 if self.translation_queue and not self.use_offline_translation:
                     for token in new_tokens:
                         await self.translation_queue.put(token)
