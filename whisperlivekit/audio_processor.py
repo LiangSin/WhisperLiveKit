@@ -742,15 +742,23 @@ class AudioProcessor:
 
                 state = await self.get_current_state()
                 
+                async with self.lock:
+                    tokens_snapshot = list(self.state.tokens)
+
                 if self.sentence_detector:
                     from whisperlivekit.sentence_detector import format_sentence_lines
-                    lines, undiarized_text = format_sentence_lines(state, self.args)
+                    lines, undiarized_text = await asyncio.to_thread(
+                        format_sentence_lines, state, self.args,
+                        tokens=tokens_snapshot,
+                    )
                 else:
-                    lines, undiarized_text = format_output(
+                    lines, undiarized_text = await asyncio.to_thread(
+                        format_output,
                         state,
                         self.silence,
                         args=self.args,
                         sep=self.sep,
+                        tokens=tokens_snapshot,
                     )
                 if lines and lines[-1].speaker == -2:
                     buffer_transcription = Transcript()

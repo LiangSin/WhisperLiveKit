@@ -266,7 +266,7 @@ class SentenceDetectionProcessor:
 # Output formatter for sentence-detection mode
 # ---------------------------------------------------------------------------
 
-def format_sentence_lines(state, args):
+def format_sentence_lines(state, args, tokens=None):
     """
     Build `~whisperlivekit.timed_objects.Line` objects from SaT-detected
     sentences instead of raw ASR tokens.
@@ -278,6 +278,9 @@ def format_sentence_lines(state, args):
     args:
         The server argument namespace (currently unused, reserved for future
         options such as per-speaker sentence splitting).
+    tokens:
+        Optional pre-snapshotted token list. When *None*, ``state.tokens``
+        is used directly.
     """
     sentences = list(state.sentence_segments)
     pending = getattr(state, "sentence_pending", None)
@@ -286,7 +289,8 @@ def format_sentence_lines(state, args):
     if not sentences:
         return [], []
 
-    tokens = state.tokens
+    if tokens is None:
+        tokens = state.tokens
     translation_segs = state.translation_validated_segments or []
     if not isinstance(translation_segs, list):
         translation_segs = [translation_segs] if translation_segs else []

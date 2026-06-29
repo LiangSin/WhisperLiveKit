@@ -52,10 +52,11 @@ def append_token_to_last_line(lines, sep, token):
             lines[-1].detected_language = token.detected_language
             
 
-def format_output(state, silence, args, sep):
+def format_output(state, silence, args, sep, tokens=None):
     diarization = args.diarization
     disable_punctuation_split = args.disable_punctuation_split
-    tokens = state.tokens
+    if tokens is None:
+        tokens = state.tokens
     translation_validated_segments = state.translation_validated_segments # Here we will attribute the speakers only based on the timestamps of the segments
     # Backwards/robustness: translation backend may provide a single TimedText instead of a list.
     if translation_validated_segments is None:
