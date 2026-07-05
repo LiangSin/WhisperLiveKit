@@ -4,6 +4,7 @@ import json
 import os
 import argparse
 import sys
+import ssl
 import time
 from tqdm import tqdm
 import struct
@@ -77,7 +78,13 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
             
         try:
             # Create a new connection for each chapter
-            async with websockets.connect(websocket_url) as websocket:
+            ssl_context = None
+            if websocket_url.startswith("wss://"):
+                ssl_context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+                ssl_context.check_hostname = False
+                ssl_context.verify_mode = ssl.CERT_NONE
+
+            async with websockets.connect(websocket_url, ssl=ssl_context) as websocket:
                 # Wait for config message
                 config_msg = await websocket.recv()
                 try:
