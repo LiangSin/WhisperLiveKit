@@ -820,15 +820,6 @@ class AudioProcessor:
         
     async def create_tasks(self):
         """Create and start processing tasks."""
-        
-        if self.transcription and hasattr(self.transcription, 'start'):
-            logger.info("Initializing transcription backend asynchronously...")
-            await self.transcription.start()
-            
-            if hasattr(self.transcription.asr, 'replenish_pool'):
-                 # Run replenishment in background to avoid blocking current user and future users
-                 loop = asyncio.get_running_loop()
-                 loop.run_in_executor(None, self.transcription.asr.replenish_pool)
 
         self.all_tasks_for_cleanup = []
         processing_tasks_for_watchdog = []

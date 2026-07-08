@@ -325,14 +325,6 @@ def parse_args():
     )
     
     simulstreaming_group.add_argument(
-        "--preload-model-count",
-        type=int,
-        default=1,
-        dest="preload_model_count",
-        help="Optional. Number of models to preload in memory to speed up loading (set up to the expected number of concurrent instances).",
-    )
-
-    simulstreaming_group.add_argument(
         "--translation-model",
         type=str,
         default="nllw",

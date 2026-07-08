@@ -9,7 +9,6 @@ from whisperlivekit.whisper import load_model, tokenizer
 from whisperlivekit.whisper.audio import TOKENS_PER_SECOND
 import os
 import gc
-import time
 from pathlib import Path
 from whisperlivekit.model_paths import model_path_and_type, resolve_model_path
 from whisperlivekit.backend_support import (
@@ -18,9 +17,8 @@ from whisperlivekit.backend_support import (
 )
 
 import torch
-from contextlib import contextmanager
 from whisperlivekit.simul_whisper.config import AlignAttConfig
-from whisperlivekit.simul_whisper.simul_whisper import PaddedAlignAttWhisper
+from whisperlivekit.simul_whisper.simul_whisper import AlignAtt
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +44,8 @@ if HAS_FASTER_WHISPER:
 else:
     WhisperModel = None
 
+MIN_DURATION_REAL_SILENCE = 5
+
 class SimulStreamingOnlineProcessor:
     SAMPLING_RATE = 16000
 
@@ -53,57 +53,31 @@ class SimulStreamingOnlineProcessor:
         self,
         asr,
         logfile=sys.stderr,
-    ):        
+    ):
         self.asr = asr
         self.logfile = logfile
         self.end = 0.0
         self.buffer = []
         self.committed: List[ASRToken] = []
         self.last_result_tokens: List[ASRToken] = []
-        self.model = None
-        self._cuda_stream = None
-        
-        #can be moved
-        if asr.tokenizer:
-            self.model_tokenizer = asr.tokenizer # Store temporarily or handle in start()
+        self.load_new_alignatt_instance()
 
-    async def start(self):
-        import asyncio
-        def _load():
-            return self.asr.get_new_model_instance()
-            
-        model = await asyncio.to_thread(_load)
-        
-        self.model = PaddedAlignAttWhisper(
+        if asr.tokenizer:
+            self.model.tokenizer = asr.tokenizer
+
+    def load_new_alignatt_instance(self):
+        """Initialize an AlignAtt decoder backed by the shared model.
+
+        The model weights are shared across all sessions; each AlignAtt
+        instance only holds its own lightweight DecoderState (kv_cache,
+        tokens, context), so creating one per connection is cheap.
+        """
+        self.model = AlignAtt(
             cfg=self.asr.cfg,
-            loaded_model=model,
+            loaded_model=self.asr.shared_model,
             mlx_encoder=self.asr.mlx_encoder,
             fw_encoder=self.asr.fw_encoder,
         )
-        # Ensure kv_cache/decoder state are clean for a fresh connection
-        self.model._clean_cache()
-        self.model.refresh_segment(complete=True)
-        if hasattr(self, 'model_tokenizer'):
-             self.model.tokenizer = self.model_tokenizer
-
-        device = getattr(self.asr, 'whisper_device', None)
-        if device and torch.cuda.is_available() and 'cuda' in str(device):
-            self._cuda_stream = torch.cuda.Stream(device=torch.device(device))
-            logger.info("Created dedicated CUDA stream on %s for client.", device)
-
-    def load_new_backend(self):
-        # This method is kept for compatibility or synchronous usage if needed, 
-        # but start() should be preferred for async contexts.
-        model = self.asr.get_new_model_instance()
-        self.model = PaddedAlignAttWhisper(
-            cfg=self.asr.cfg,
-            loaded_model=model,
-            mlx_encoder=self.asr.mlx_encoder,
-            fw_encoder=self.asr.fw_encoder,
-            )
-        # Ensure kv_cache/decoder state are clean for a fresh connection
-        self.model._clean_cache()
-        self.model.refresh_segment(complete=True)
 
     def start_silence(self):
         tokens, processed_upto = self.process_iter(is_last=True)
@@ -111,10 +85,13 @@ class SimulStreamingOnlineProcessor:
 
     def end_silence(self, silence_duration, offset):
         """
-        If silences are > 5s, we do a complete context clear. Otherwise, we just insert a small silence and shift the last_attend_frame
+        Handle silence period.
+
+        If silence > MIN_DURATION_REAL_SILENCE, do a complete context clear.
+        Otherwise, insert a small silence and shift the last_attend_frame.
         """
         self.end += silence_duration
-        long_silence = silence_duration >= 5
+        long_silence = silence_duration >= MIN_DURATION_REAL_SILENCE
         if not long_silence:
             gap_len = int(16000 * silence_duration)
             if gap_len > 0:
@@ -124,67 +101,55 @@ class SimulStreamingOnlineProcessor:
             self.model.refresh_segment(complete=True)
             self.model.global_time_offset = silence_duration + offset
 
-
-        
     def insert_audio_chunk(self, audio: np.ndarray, audio_stream_end_time):
         """Append an audio chunk to be processed by SimulStreaming."""
-            
+
         # Convert numpy array to torch tensor
         audio_tensor = torch.from_numpy(audio).float()
-        self.end = audio_stream_end_time #Only to be aligned with what happens in whisperstreaming backend.
+        self.end = audio_stream_end_time  # Aligned with whisperstreaming backend behavior
         self.model.insert_audio(audio_tensor)
 
     def new_speaker(self, change_speaker: ChangeSpeaker):
-            self.process_iter(is_last=True)
-            self.model.refresh_segment(complete=True)
-            self.model.speaker = change_speaker.speaker
-            self.global_time_offset = change_speaker.start
-            
+        """Handle speaker change event."""
+        self.process_iter(is_last=True)
+        self.model.refresh_segment(complete=True)
+        self.model.speaker = change_speaker.speaker
+        self.model.global_time_offset = change_speaker.start
+
     def get_buffer(self):
         concat_buffer = Transcript.from_tokens(tokens= self.buffer, sep='')
         return concat_buffer
 
-    @contextmanager
-    def _on_stream(self):
-        """Route GPU work to this client's dedicated CUDA stream.
-
-        Using non-default streams avoids implicit synchronisation with
-        the legacy default stream (stream 0), which would otherwise
-        serialise all clients' GPU work on the same device.
-        """
-        if self._cuda_stream is not None:
-            with torch.cuda.stream(self._cuda_stream):
-                yield
-        else:
-            yield
-
     def process_iter(self, is_last=False) -> Tuple[List[ASRToken], float]:
         """
         Process accumulated audio chunks using SimulStreaming.
-        
+
         Returns a tuple: (list of committed ASRToken objects, float representing the audio processed up to time).
         """
-        with self._on_stream():
-            try:
-                timestamped_words = self.model.infer(is_last=is_last)
-                if self.model.cfg.language == "auto" and timestamped_words and timestamped_words[0].detected_language == None:
-                    self.buffer.extend(timestamped_words)
-                    return [], self.end
-                
-                self.committed.extend(timestamped_words)
+        try:
+            timestamped_words = self.model.infer(is_last=is_last)
 
-                if len(self.committed) > 1500:
-                    removed_count = len(self.committed) - 1000
-                    self.committed = self.committed[-1000:]
-                    logger.info(f"Gradually cleaned up {removed_count} old committed tokens, keeping recent 1000")
-
-                self.buffer = []
-                return timestamped_words, self.end
-                
-            except Exception as e:
-                logger.exception(f"SimulStreaming processing error: {e}")
-                self.model._clean_cache()
+            if not timestamped_words:
                 return [], self.end
+
+            if self.model.cfg.language == "auto" and timestamped_words[0].detected_language is None:
+                self.buffer.extend(timestamped_words)
+                return [], self.end
+
+            self.committed.extend(timestamped_words)
+
+            if len(self.committed) > 1500:
+                removed_count = len(self.committed) - 1000
+                self.committed = self.committed[-1000:]
+                logger.info(f"Gradually cleaned up {removed_count} old committed tokens, keeping recent 1000")
+
+            self.buffer = []
+            return timestamped_words, self.end
+
+        except Exception as e:
+            logger.exception(f"SimulStreaming processing error: {e}")
+            self.model._clean_cache()
+            return [], self.end
 
     def warmup(self, audio, init_prompt=""):
         """Warmup the SimulStreaming model."""
@@ -200,8 +165,8 @@ class SimulStreamingOnlineProcessor:
         """Discard all pending state and force a complete context reset.
 
         Called when a hallucination phrase is detected in the model output.
-        Clears the KV cache, attention matrices, and all buffered segments so
-        that the next inference starts from a clean slate.
+        Clears the KV cache and all buffered segments so that the next
+        inference starts from a clean slate.
 
         When `current_time_offset` is provided, global_time_offset is
         updated so that new tokens continue with monotonically increasing
@@ -213,40 +178,29 @@ class SimulStreamingOnlineProcessor:
                 self.model.global_time_offset = current_time_offset
 
     def close(self):
-        """Explicitly clean up resources."""
-        if self._cuda_stream is not None:
-            self._cuda_stream.synchronize()
+        """Release this session's decoder state.
 
-        if self.model is not None:
-            self.model.remove_hooks()
-            self.asr.release_model(self.model.model)
-            self.model = None
-            
-        # Force GC collection to ensure tensors are freed
+        The underlying Whisper model is shared across sessions and stays
+        loaded; only the per-session AlignAtt/DecoderState is dropped.
+        """
+        self.model = None
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
     def __del__(self):
-        # free the model and add a new model to stack.
-        # del self.model
-        # gc.collect()
-        # torch.cuda.empty_cache()
-        # self.asr.new_model_to_stack()
+        # Cleanup is handled explicitly in close() to avoid race conditions
+        # during GC in threaded environments.
         pass
-        # Logic moved to close() to avoid race conditions during GC in threaded environments
-
-import threading
 
 class SimulStreamingASR():
     """SimulStreaming backend with AlignAtt policy."""
     sep = ""
 
     def __init__(self, logfile=sys.stderr, **kwargs):
-        self.lock = threading.Lock()
         self.logfile = logfile
         self.transcribe_kargs = {}
-        
+
         for key, value in kwargs.items():
             setattr(self, key, value)
 
@@ -302,7 +256,7 @@ class SimulStreamingASR():
         self.fast_encoder = self.encoder_backend in ("mlx-whisper", "faster-whisper")
         if self.encoder_backend == "whisper":
             self.disable_fast_encoder = True
-                    
+
         self.cfg = AlignAttConfig(
                 tokenizer_is_multilingual= is_multilingual,
                 segment_length=self.min_chunk_size,
@@ -318,17 +272,14 @@ class SimulStreamingASR():
                 init_prompt=self.init_prompt,
                 max_context_tokens=self.max_context_tokens,
                 static_init_prompt=self.static_init_prompt,
-        )  
-        
+        )
+
         # Set up tokenizer for translation if needed
         if self.direct_english_translation:
             self.tokenizer = self.set_translate_task()
         else:
             self.tokenizer = None
-        
-        
-            
-    
+
         self.mlx_encoder, self.fw_encoder = None, None
         if self.encoder_backend == "mlx-whisper":
             print('Simulstreaming will use MLX whisper to increase encoding speed.')
@@ -355,7 +306,10 @@ class SimulStreamingASR():
                 device_index=fw_device_index,
             )
 
-        self.models = [self.load_model() for i in range(self.preload_model_count)]
+        # A single model instance shared by all sessions. The hookless
+        # AlignAtt decoder keeps all per-session state in DecoderState,
+        # so concurrent connections can safely share these weights.
+        self.shared_model = self.load_model()
 
 
     def _resolve_encoder_backend(self, preferred_backend, compatible_whisper_mlx, compatible_faster_whisper):
@@ -409,36 +363,18 @@ class SimulStreamingASR():
         warmup_audio = load_file(self.warmup_file)
         if warmup_audio is not None:
             warmup_audio = torch.from_numpy(warmup_audio).float()
-            if self.fast_encoder:                
-                temp_model = PaddedAlignAttWhisper(
+            if self.fast_encoder:
+                temp_model = AlignAtt(
                     cfg=self.cfg,
                     loaded_model=whisper_model,
                     mlx_encoder=self.mlx_encoder,
                     fw_encoder=self.fw_encoder,
                 )
                 temp_model.warmup(warmup_audio)
-                temp_model.remove_hooks()
             else:
                 # For standard encoder, use the original transcribe warmup
-                warmup_audio = load_file(self.warmup_file)
                 whisper_model.transcribe(warmup_audio, language=self.lan if self.lan != 'auto' else None)
         return whisper_model
-    
-    def get_new_model_instance(self):
-        """
-        SimulStreaming cannot share the same backend because it uses global forward hooks on the attention layers.
-        Therefore, each user requires a separate model instance, which can be memory-intensive. To maintain speed, we preload the models into memory.
-        """
-        with self.lock:
-            if len(self.models) == 0:
-                self.models.append(self.load_model())
-            new_model = self.models.pop()
-            return new_model
-
-    def new_model_to_stack(self):
-        with self.lock:
-             self.models.append(self.load_model())
-        
 
     def set_translate_task(self):
         """Set up translation task."""
@@ -456,26 +392,3 @@ class SimulStreamingASR():
         Warmup is done directly in load_model
         """
         pass
-
-    def release_model(self, model_instance):
-        """Return a model instance to the pool."""
-        with self.lock:
-            if len(self.models) < self.preload_model_count:
-                self.models.append(model_instance)
-                logger.info("Returned model to pool.")
-            else:
-                # If pool is full, we could optionally discard the model
-                # or expand the pool if needed. For now, discard to save memory.
-                logger.info("Pool full, discarding returned model.")
-                # Explicitly delete to help GC
-                del model_instance
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-
-    def replenish_pool(self):
-        # Deprecated or used for initial fill. 
-        # Now we rely on release_model to keep the pool populated.
-        with self.lock:
-            if len(self.models) >= self.preload_model_count:
-                return
