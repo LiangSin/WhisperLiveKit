@@ -8,6 +8,7 @@ Public surface:
 """
 
 import asyncio
+import bisect
 import logging
 import traceback
 import torch
@@ -276,8 +277,8 @@ def format_sentence_lines(state, args, tokens=None):
     state:
         The shared `~whisperlivekit.timed_objects.State`.
     args:
-        The server argument namespace (currently unused, reserved for future
-        options such as per-speaker sentence splitting).
+        The server argument namespace.  When ``args.diarization`` is falsy
+        the expensive per-sentence speaker scan is skipped entirely.
     tokens:
         Optional pre-snapshotted token list. When *None*, ``state.tokens``
         is used directly.
@@ -295,9 +296,11 @@ def format_sentence_lines(state, args, tokens=None):
     if not isinstance(translation_segs, list):
         translation_segs = [translation_segs] if translation_segs else []
 
+    use_diarization = getattr(args, "diarization", False)
+
     lines: List[Line] = []
     for sentence in sentences:
-        speaker = _dominant_speaker(tokens, sentence.start, sentence.end)
+        speaker = _dominant_speaker(tokens, sentence.start, sentence.end) if use_diarization else 1
         lines.append(Line(
             speaker=speaker,
             text=sentence.text,
@@ -350,21 +353,59 @@ def format_sentence_lines(state, args, tokens=None):
     return lines, []
 
 
+class _TokenStartIndex:
+    """Lazy-built index over token start times for bisect lookups.
+
+    Rebuilt only when the token list identity or length changes.
+    """
+    __slots__ = ("_id", "_len", "_starts")
+
+    def __init__(self):
+        self._id = None
+        self._len = 0
+        self._starts: List[float] = []
+
+    def get_starts(self, tokens: List[ASRToken]) -> List[float]:
+        tid = id(tokens)
+        tlen = len(tokens)
+        if self._id != tid or self._len != tlen:
+            self._starts = [t.start for t in tokens]
+            self._id = tid
+            self._len = tlen
+        return self._starts
+
+_token_start_idx = _TokenStartIndex()
+
+
 def _dominant_speaker(tokens: List[ASRToken], start: float, end: float) -> int:
-    """Return the most common speaker among tokens that overlap [start, end)."""
-    overlapping = [
-        t for t in tokens
-        if not getattr(t, "is_dummy", False) and t.start < end and t.end > start
-    ]
-    if not overlapping:
+    """Return the most common speaker among tokens that overlap [start, end).
+
+    Uses bisect on token start times to narrow the scan window instead of
+    iterating over all tokens.
+    """
+    if not tokens:
         return 1
-    speakers = []
-    for t in overlapping:
+    starts = _token_start_idx.get_starts(tokens)
+    # Tokens with t.start < end could overlap; bisect_left finds the
+    # first token whose start >= end — everything before that is a
+    # candidate.  Among those, we only want tokens with t.end > start.
+    hi = bisect.bisect_left(starts, end)
+    if hi == 0:
+        return 1
+    counts: dict = {}
+    for i in range(hi):
+        t = tokens[i]
+        if t.end <= start:
+            continue
         sp = getattr(t, "corrected_speaker", t.speaker)
         if sp is None or sp == -1:
             sp = 1
-        speakers.append(int(sp))
-    return Counter(speakers).most_common(1)[0][0]
+        else:
+            sp = int(sp)
+        counts[sp] = counts.get(sp, 0) + 1
+    if not counts:
+        return 1
+    return max(counts, key=counts.__getitem__)
 
 
 # ---------------------------------------------------------------------------
