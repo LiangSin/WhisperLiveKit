@@ -79,7 +79,12 @@ def disable_sdpa():
 
 
 class MultiHeadAttention(nn.Module):
-    use_sdpa = False  # Disable SDPA to ensure qk is always computed when needed
+    # When True, SDPA (FlashAttention / memory-efficient attention) is used for
+    # attention calls that do not need the QK matrix returned (need_qk=False).
+    # Cross-attention alignment always requests need_qk=True and therefore always
+    # takes the manual path regardless of this flag. disable_sdpa() sets this to
+    # False to force the manual path everywhere (used by timing.find_alignment).
+    use_sdpa = True
 
     def __init__(self, n_state: int, n_head: int, cache_id: str = "", n_text_ctx: int = 448):
         super().__init__()
@@ -107,11 +112,13 @@ class MultiHeadAttention(nn.Module):
         q = self.query(x)
 
         if xa is None:
-            # Self-attention
+            # Self-attention. Its QK matrix is never consumed downstream
+            # (ResidualAttentionBlock discards it), so SDPA can be used.
             k = self.key(x)
             v = self.value(x)
             if kv_cache is not None:
                 k, v = self._update_self_attn_cache(k, v, kv_cache)
+            wv, qk = self.qkv_attention(q, k, v, mask)
         else:
             # Cross-attention: compute once and cache, or reuse from cache
             if kv_cache is not None and self.key_cache_id in kv_cache:
@@ -123,8 +130,10 @@ class MultiHeadAttention(nn.Module):
                 if kv_cache is not None:
                     kv_cache[self.key_cache_id] = k
                     kv_cache[self.value_cache_id] = v
+            # The QK matrix feeds AlignAtt's attention alignment, so the
+            # manual path that materialises it is required here.
+            wv, qk = self.qkv_attention(q, k, v, mask, need_qk=True)
 
-        wv, qk = self.qkv_attention(q, k, v, mask)
         return self.out(wv), qk
 
     def _update_self_attn_cache(
@@ -146,7 +155,8 @@ class MultiHeadAttention(nn.Module):
         return k, v
 
     def qkv_attention(
-        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None
+        self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None,
+        need_qk: bool = False,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
@@ -154,7 +164,11 @@ class MultiHeadAttention(nn.Module):
         k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
-        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa:
+        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and not need_qk:
+            # Note: is_causal is only valid when the query covers the whole
+            # sequence (empty kv_cache). In this codebase a multi-token query
+            # always comes with a fresh cache; cached steps pass n_ctx == 1,
+            # where no mask is needed.
             a = scaled_dot_product_attention(
                 q, k, v, is_causal=mask is not None and n_ctx > 1
             )

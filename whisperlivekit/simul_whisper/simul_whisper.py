@@ -483,7 +483,7 @@ class AlignAtt:
         l_absolute_timestamps = []
         
         accumulated_cross_attns = []
-        
+
         while not completed and current_tokens.shape[1] < self.max_text_len:  # bos is 3 tokens
 
             if new_segment:
@@ -495,7 +495,7 @@ class AlignAtt:
             # Get logits and cross-attention weights from decoder
             result = self.logits(tokens_for_logits, encoder_feature, return_cross_attn=True)
             logits, cross_attns = result
-            
+
             # Accumulate cross-attention from this forward pass
             accumulated_cross_attns.append(cross_attns)
 
@@ -598,7 +598,7 @@ class AlignAtt:
         self.state.tokens.append(new_tokens)
 
         logger.info(f"Output: {self.tokenizer.decode(new_hypothesis)}")
-        
+
         self._clean_cache()
 
         if len(l_absolute_timestamps) >= 2 and self.state.first_timestamp is None:
