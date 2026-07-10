@@ -1,11 +1,21 @@
-import torch
-import numpy as np
 import warnings
 from pathlib import Path
+
+import numpy as np
+import torch
 
 """
 Code is adapted from silero-vad v6: https://github.com/snakers4/silero-vad
 """
+
+def is_onnx_available() -> bool:
+    """Check if onnxruntime is installed."""
+    try:
+        import onnxruntime
+        return True
+    except ImportError:
+        return False
+
 
 def init_jit_model(model_path: str, device=torch.device('cpu')):
     """Load a JIT model from file."""
@@ -14,12 +24,12 @@ def init_jit_model(model_path: str, device=torch.device('cpu')):
     return model
 
 
-class OnnxWrapper():
-    """ONNX Runtime wrapper for Silero VAD model."""
+class OnnxSession():
+    """
+    Shared ONNX session for Silero VAD model (stateless).
+    """
 
     def __init__(self, path, force_onnx_cpu=False):
-        global np
-        import numpy as np
         import onnxruntime
 
         opts = onnxruntime.SessionOptions()
@@ -31,12 +41,27 @@ class OnnxWrapper():
         else:
             self.session = onnxruntime.InferenceSession(path, sess_options=opts)
 
-        self.reset_states()
+        self.path = path
         if '16k' in path:
             warnings.warn('This model support only 16000 sampling rate!')
             self.sample_rates = [16000]
         else:
             self.sample_rates = [8000, 16000]
+
+
+class OnnxWrapper():
+    """
+    ONNX Runtime wrapper for Silero VAD model with per-instance state.
+    """
+
+    def __init__(self, session: OnnxSession, force_onnx_cpu=False):
+        self._shared_session = session
+        self.sample_rates = session.sample_rates
+        self.reset_states()
+
+    @property
+    def session(self):
+        return self._shared_session.session
 
     def _validate_input(self, x, sr: int):
         if x.dim() == 1:
@@ -90,7 +115,7 @@ class OnnxWrapper():
             out, state = ort_outs
             self._state = torch.from_numpy(state)
         else:
-            raise ValueError()
+            raise ValueError(f"Unsupported sampling rate {sr}. Supported: {self.sample_rates} (with sample sizes 256 for 8000, 512 for 16000)")
 
         self._context = x[..., -context_size:]
         self._last_sr = sr
@@ -100,58 +125,62 @@ class OnnxWrapper():
         return out
 
 
-def load_silero_vad(model_path: str = None, onnx: bool = False, opset_version: int = 16):
-    """
-    Load Silero VAD model (JIT or ONNX).
-    
-    Parameters
-    ----------
-    model_path : str, optional
-        Path to model file. If None, uses default bundled model.
-    onnx : bool, default False
-        Whether to use ONNX runtime (requires onnxruntime package).
-    opset_version : int, default 16
-        ONNX opset version (15 or 16). Only used if onnx=True.
-    
-    Returns
-    -------
-    model
-        Loaded VAD model (JIT or ONNX wrapper)
-    """
+def _get_onnx_model_path(model_path: str = None, opset_version: int = 16) -> Path:
+    """Get the path to the ONNX model file."""
     available_ops = [15, 16]
-    if onnx and opset_version not in available_ops:
-        raise Exception(f'Available ONNX opset_version: {available_ops}')
+    if opset_version not in available_ops:
+        raise ValueError(f'Unsupported ONNX opset_version: {opset_version}. Available: {available_ops}')
+
     if model_path is None:
         current_dir = Path(__file__).parent
-        data_dir = current_dir / 'vad_models'
-        
-        if onnx:
-            if opset_version == 16:
-                model_name = 'silero_vad.onnx'
-            else:
-                model_name = f'silero_vad_16k_op{opset_version}.onnx'
+        data_dir = current_dir / 'silero_vad_models'
+
+        if opset_version == 16:
+            model_name = 'silero_vad.onnx'
         else:
-            model_name = 'silero_vad.jit'
-        
+            model_name = f'silero_vad_16k_op{opset_version}.onnx'
+
         model_path = data_dir / model_name
-        
+
         if not model_path.exists():
             raise FileNotFoundError(
                 f"Model file not found: {model_path}\n"
-                f"Please ensure the whisperlivekit/vad_models/ directory contains the model files."
+                f"Please ensure the whisperlivekit/silero_vad_models/ directory contains the model files."
             )
     else:
         model_path = Path(model_path)
-    if onnx:
-        try:
-            model = OnnxWrapper(str(model_path), force_onnx_cpu=True)
-        except ImportError:
-            raise ImportError(
-                "ONNX runtime not available. Install with: pip install onnxruntime\n"
-                "Or use JIT model by setting onnx=False"
+
+    return model_path
+
+
+def load_onnx_session(model_path: str = None, opset_version: int = 16, force_onnx_cpu: bool = True) -> OnnxSession:
+    """
+    Load a shared ONNX session for Silero VAD.
+    """
+    path = _get_onnx_model_path(model_path, opset_version)
+    return OnnxSession(str(path), force_onnx_cpu=force_onnx_cpu)
+
+
+def load_jit_vad(model_path: str = None):
+    """
+    Load Silero VAD model in JIT format.
+    """
+    if model_path is None:
+        current_dir = Path(__file__).parent
+        data_dir = current_dir / 'silero_vad_models'
+        model_name = 'silero_vad.jit'
+
+        model_path = data_dir / model_name
+
+        if not model_path.exists():
+            raise FileNotFoundError(
+                f"Model file not found: {model_path}\n"
+                f"Please ensure the whisperlivekit/silero_vad_models/ directory contains the model files."
             )
     else:
-        model = init_jit_model(str(model_path))
+        model_path = Path(model_path)
+
+    model = init_jit_model(str(model_path))
 
     return model
 
@@ -159,10 +188,10 @@ def load_silero_vad(model_path: str = None, onnx: bool = False, opset_version: i
 class VADIterator:
     """
     Voice Activity Detection iterator for streaming audio.
-    
+
     This is the Silero VAD v6 implementation.
     """
-    
+
     def __init__(self,
                  model,
                  threshold: float = 0.5,
@@ -226,8 +255,8 @@ class VADIterator:
         if not torch.is_tensor(x):
             try:
                 x = torch.Tensor(x)
-            except:
-                raise TypeError("Audio cannot be casted to tensor. Cast it manually")
+            except (ValueError, TypeError, RuntimeError) as exc:
+                raise TypeError("Audio cannot be cast to tensor. Cast it manually") from exc
 
         window_size_samples = len(x[0]) if x.dim() == 2 else len(x)
         self.current_sample += window_size_samples
@@ -259,36 +288,44 @@ class VADIterator:
 class FixedVADIterator(VADIterator):
     """
     Fixed VAD Iterator that handles variable-length audio chunks, not only exactly 512 frames at once.
+
+    Return contract:
+        ``__call__`` returns a ``list[dict]`` containing all single-frame VAD events
+        produced while consuming the input, in chronological order. Each event is
+        shaped like ``{"start": int}`` or ``{"end": int}``; an empty list means
+        no event was produced for this input.
+
+    Older versions merged all events from a single call into one dict. When an
+    ``end`` event was followed by a ``start`` event in the same call, the later
+    ``start`` could delete the earlier ``end`` and hide the silence boundary from
+    downstream processing. Callers now consume the ordered event list and split
+    audio around each boundary themselves.
     """
 
     def reset_states(self):
         super().reset_states()
         self.buffer = np.array([], dtype=np.float32)
 
-    def __call__(self, x, return_seconds=False):
+    def __call__(self, x, return_seconds=False) -> list[dict]:
         self.buffer = np.append(self.buffer, x)
-        ret = None
+        events = []
         while len(self.buffer) >= 512:
             r = super().__call__(self.buffer[:512], return_seconds=return_seconds)
             self.buffer = self.buffer[512:]
-            if ret is None:
-                ret = r
-            elif r is not None:
-                if "end" in r:
-                    ret["end"] = r["end"]
-                if "start" in r and "end" in ret:
-                    del ret["end"]
-        return ret if ret != {} else None
+            if r is not None:
+                events.append(r)
+        return events
 
 
 if __name__ == "__main__":
-    model = load_silero_vad(onnx=False)
-    vad = FixedVADIterator(model)
-    
+    # vad = FixedVADIterator(load_jit_vad())
+    vad = FixedVADIterator(OnnxWrapper(session=load_onnx_session()))
+
     audio_buffer = np.array([0] * 512, dtype=np.float32)
-    result = vad(audio_buffer)
-    print(f"   512 samples: {result}")
-    
+    events = vad(audio_buffer)
+    print(f"   512 samples: events={events}")
+
     # test with 511 samples
     audio_buffer = np.array([0] * 511, dtype=np.float32)
-    result = vad(audio_buffer)
+    events = vad(audio_buffer)
+    print(f"   511 samples: events={events}")

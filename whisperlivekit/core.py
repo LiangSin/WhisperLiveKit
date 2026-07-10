@@ -46,7 +46,6 @@ class TranscriptionEngine:
             "punctuation_split": False,
             "target_language": "",
             "vac": True,
-            "vac_onnx": False,
             "vac_backend": "silero",
             "vac_chunk_size": 0.04,
             "vad_threshold": 0.5,
@@ -103,20 +102,26 @@ class TranscriptionEngine:
         self.asr = None
         self.tokenizer = None
         self.diarization = None
-        self.vac_model = None
-        
+        self.vac_session = None
+
         if self.args.vac:
             vac_backend = self.args.vac_backend
             if vac_backend == "ten-vad":
                 # TEN VAD creates its model internally per AudioProcessor instance;
                 # no shared model object is needed here.
-                self.vac_model = None
                 logger.info("VAC backend: TEN VAD")
             else:
-                from whisperlivekit.silero_vad_iterator import load_silero_vad
-                use_onnx = kwargs.get('vac_onnx', False)
-                self.vac_model = load_silero_vad(onnx=use_onnx)
-                logger.info("VAC backend: Silero VAD (onnx=%s)", use_onnx)
+                from whisperlivekit.silero_vad_iterator import is_onnx_available
+
+                if is_onnx_available():
+                    from whisperlivekit.silero_vad_iterator import load_onnx_session
+                    self.vac_session = load_onnx_session()
+                else:
+                    logger.warning(
+                        "onnxruntime not installed. VAC will use JIT model which is loaded per-session. "
+                        "For multi-user scenarios, install onnxruntime: pip install onnxruntime"
+                    )
+                logger.info("VAC backend: Silero VAD (onnx=%s)", self.vac_session is not None)
         
         backend_policy = self.args.backend_policy
         if self.args.transcription:

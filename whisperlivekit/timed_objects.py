@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Any, List
+from typing import Optional, Any, List, Union
 from collections import deque
 from datetime import timedelta
 
@@ -124,11 +124,23 @@ class Translation(TimedText):
 
 @dataclass
 class Silence():
+    start: Optional[float] = None
+    end: Optional[float] = None
     duration: Optional[float] = None
     is_starting: bool = False
     has_ended: bool = False
-    
-    
+
+    def compute_duration(self) -> Optional[float]:
+        if self.start is None or self.end is None:
+            return None
+        self.duration = self.end - self.start
+        return self.duration
+
+    def is_silence(self) -> bool:
+        return True
+
+
+
 @dataclass
 class Line(TimedText):
     translation: str = ''
@@ -193,6 +205,8 @@ class State():
     remaining_time_transcription: float = 0.0
     remaining_time_diarization: float = 0.0
     beg_loop: Optional[int] = None
+    # Long (> MIN_DURATION_REAL_SILENCE) silences recorded by the VAD, same as main.
+    new_tokens: List[Union[ASRToken, Silence]] = field(default_factory=list)
     sentence_segments: deque = field(default_factory=lambda: deque(maxlen=200))
     sentence_pending: Optional["Sentence"] = None  # In-progress sentence (may update); propagated for display
     translation_pending: Optional["Translation"] = None  # Provisional translation of sentence_pending; superseded by validated segments

@@ -7,7 +7,7 @@ Wraps the TenVad class (pip install ten-vad) to provide the same streaming
 interface as FixedVADIterator from silero_vad_iterator.py:
 
     vad = TenVADIterator(hop_size=256, threshold=0.5)
-    result = vad(pcm_float32_array)   # {'start': N}, {'end': N}, or None
+    events = vad(pcm_float32_array)   # [{'start': N}, {'end': N}, ...] in order
     vad.reset_states()
 
 TEN VAD reference: https://github.com/TEN-framework/ten-vad
@@ -34,10 +34,13 @@ class TenVADIterator:
         Audio sampling rate in Hz. TEN VAD only supports 16000. Default: 16000.
     min_silence_duration_ms : int
         Minimum silence duration (ms) required to end a speech segment.
-        Default: 100.
+        Default: 100 (same as Silero VADIterator).
     speech_pad_ms : int
         Padding (ms) added to each side of a detected speech segment.
-        Default: 30.
+        Default: 30 (same as Silero VADIterator).
+    hysteresis : float
+        A segment only closes once probability drops below
+        (threshold - hysteresis). Default: 0.15 (same as Silero VADIterator).
     """
 
     def __init__(
@@ -47,6 +50,7 @@ class TenVADIterator:
         sampling_rate: int = 16000,
         min_silence_duration_ms: int = 100,
         speech_pad_ms: int = 30,
+        hysteresis: float = 0.15,
     ):
         if sampling_rate != 16000:
             raise ValueError("TEN VAD only supports 16000 Hz sampling rate.")
@@ -55,6 +59,9 @@ class TenVADIterator:
 
         self.hop_size = hop_size
         self.threshold = threshold
+        # A segment only closes once probability drops below
+        # (threshold - hysteresis), so quiet speech can't end it.
+        self.neg_threshold = threshold - hysteresis
         self.sampling_rate = sampling_rate
         self.min_silence_samples = sampling_rate * min_silence_duration_ms / 1000
         self.speech_pad_samples = sampling_rate * speech_pad_ms / 1000
@@ -113,7 +120,7 @@ class TenVADIterator:
                 return {"start": round(speech_start / self.sampling_rate, 1)}
             return {"start": int(speech_start)}
 
-        if speech_prob < self.threshold - 0.15 and self.triggered:
+        if speech_prob < self.neg_threshold and self.triggered:
             if not self.temp_end:
                 self.temp_end = self.current_sample
             if self.current_sample - self.temp_end < self.min_silence_samples:
@@ -140,27 +147,24 @@ class TenVADIterator:
 
         Returns
         -------
-        dict or None
-            {'start': N}  — speech segment started at sample N
-            {'end': N}    — speech segment ended at sample N
-            None          — no boundary detected in this chunk
+        list[dict]
+            All VAD events produced while consuming the input, in
+            chronological order. Each event is {'start': N} or {'end': N};
+            an empty list means no boundary was detected in this chunk.
+
+            Merging events into a single dict would let a later 'start'
+            hide an earlier 'end' and lose the silence boundary, so every
+            event is preserved.
         """
         self.buffer = np.append(self.buffer, x)
-        ret = None
+        events = []
 
         while len(self.buffer) >= self.hop_size:
             chunk = self.buffer[: self.hop_size]
             self.buffer = self.buffer[self.hop_size :]
 
             r = self._process_chunk(chunk, return_seconds)
+            if r is not None:
+                events.append(r)
 
-            if ret is None:
-                ret = r
-            elif r is not None:
-                # Merge: a later 'end' overwrites, a later 'start' after 'end' reopens
-                if "end" in r:
-                    ret["end"] = r["end"]
-                if "start" in r and "end" in ret:
-                    del ret["end"]
-
-        return ret if ret != {} else None
+        return events
