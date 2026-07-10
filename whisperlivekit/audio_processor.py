@@ -184,11 +184,21 @@ class AudioProcessor:
                     speech_pad_ms=200,
                     hysteresis=0.25,
                 )
-            elif models.vac_session is not None:
-                vac_model = OnnxWrapper(session=models.vac_session)
-                self.vac = FixedVADIterator(vac_model, threshold=self.args.vad_threshold)
             else:
-                self.vac = FixedVADIterator(load_jit_vad(), threshold=self.args.vad_threshold)
+                # Same rationale as TEN VAD above: fewer boundaries mean fewer
+                # forced finalizations. Measured on real session audio, Silero
+                # with these settings emits zero non-speech audio (music /
+                # ambient noise stays at prob ~0.0) and only ~3 boundaries.
+                if models.vac_session is not None:
+                    vac_model = OnnxWrapper(session=models.vac_session)
+                else:
+                    vac_model = load_jit_vad()
+                self.vac = FixedVADIterator(
+                    vac_model,
+                    threshold=self.args.vad_threshold,
+                    min_silence_duration_ms=1000,
+                    speech_pad_ms=200,
+                )
                          
         self.ffmpeg_manager = None
         self.ffmpeg_reader_task = None

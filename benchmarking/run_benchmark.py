@@ -33,7 +33,28 @@ def parse_end(value, default=0.0) -> float:
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import DatasetClass
 
-async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False, speed=0.0):
+
+def merge_with_overlap(acc, new, probe_len=100, volatile=300):
+    """Merge a full-transcript snapshot into an accumulated transcript.
+
+    For servers whose lines grow in place and whose old tokens get pruned
+    (e.g. upstream main), each message carries a full snapshot of a sliding
+    window. Anchor on a stable probe just before the volatile tail of the
+    accumulated text and splice the snapshot's continuation onto it.
+    """
+    if not acc:
+        return new
+    if len(acc) <= volatile + probe_len:
+        return new if len(new) >= len(acc) else acc
+    probe_end = len(acc) - volatile
+    probe = acc[probe_end - probe_len:probe_end]
+    idx = new.find(probe)
+    if idx != -1:
+        return acc[:probe_end] + new[idx + probe_len:]
+    return acc + " " + new
+
+
+async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False, speed=0.0, accumulate_mode="lines"):
     print(f"Loading dataset from {dataset_path} using class {dataset_class_name}...")
     
     try:
@@ -121,6 +142,16 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                 accumulated_translation = ""    # committed translations concatenated so far
                 accumulated_translation_end = 0.0  # end timestamp of last committed translation line
                 pending_translation = ""        # translation of the current pending sentence
+
+                merged_text = ""
+
+                def merge_transcript(msg_data):
+                    """Snapshot-merge mode for servers whose lines grow in place."""
+                    nonlocal merged_text
+                    lines = msg_data.get("lines") or []
+                    full = " ".join(l.get("text", "") for l in lines if l.get("text")).strip()
+                    if full:
+                        merged_text = merge_with_overlap(merged_text, full)
 
                 def update_transcript(msg_data):
                     nonlocal accumulated_text, accumulated_end, pending_text
@@ -216,7 +247,10 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                                 if debug:
                                     print(f"[DEBUG] Received ready_to_stop for group {group_id}")
                                 break
-                            update_transcript(data)
+                            if accumulate_mode == "merge":
+                                merge_transcript(data)
+                            else:
+                                update_transcript(data)
                         except websockets.exceptions.ConnectionClosed:
                             print(f"Connection closed while waiting to stop for {group_id}")
                             break
@@ -250,7 +284,10 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     translate_answer_out.flush()
 
                 # Combine committed sentences with the final pending sentence (if any).
-                hyp = " ".join(filter(None, [accumulated_text, pending_text])).strip()
+                if accumulate_mode == "merge":
+                    hyp = merged_text.strip()
+                else:
+                    hyp = " ".join(filter(None, [accumulated_text, pending_text])).strip()
                 # Concatenate references
                 ref = " ".join([s['text'] for s in chapter_samples])
                 
@@ -317,8 +354,9 @@ if __name__ == "__main__":
     parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
     parser.add_argument("--translate", action="store_true", help="Collect translation output from the server and save to a separate file")
     parser.add_argument("--speed", type=float, default=0.0, help="Audio streaming speed factor: 0 = send as fast as possible (default), 1.0 = real-time (matches production)")
+    parser.add_argument("--accumulate-mode", choices=["lines", "merge"], default="lines", dest="accumulate_mode", help="How to build the hypothesis: 'lines' (this repo's stable sentence lines) or 'merge' (overlap-merge full snapshots; for upstream main whose lines grow in place and get pruned)")
     args = parser.parse_args()
 
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate, speed=args.speed))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate, speed=args.speed, accumulate_mode=args.accumulate_mode))

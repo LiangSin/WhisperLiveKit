@@ -46,7 +46,7 @@ services:
       --host 0.0.0.0
       --port 8000
       --model-path ${WLK_MODEL_PATH:-models/cool-whisper}
-      --vac-backend ${WLK_VAC_BACKEND:-ten-vad}
+      --vac-backend ${WLK_VAC_BACKEND:-silero}
       --language ${WLK_LANGUAGE:-zh}
       --translation-model ${WLK_TRANSLATION_MODEL:-translategemma}
       --translation-model-size ${WLK_TRANSLATION_MODEL_SIZE:-4b}
