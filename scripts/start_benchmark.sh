@@ -75,9 +75,10 @@ case "$preset" in
     ;;
   --youtube-debug)
     preset_args=(
-      --dataset_path dataset/youtube_data/debug/@NTUOCW
+      --dataset_path dataset/PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK/test1
       --dataset_class YoutubeDataset
-      --output benchmarking/results/youtube-small-ten-vad.json
+      --output benchmarking/results/youtube-debug.json
+      --url wss://localhost:8000/asr
     )
     ;;
   --translate)

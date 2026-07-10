@@ -33,7 +33,7 @@ def parse_end(value, default=0.0) -> float:
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import DatasetClass
 
-async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False):
+async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False, speed=0.0):
     print(f"Loading dataset from {dataset_path} using class {dataset_class_name}...")
     
     try:
@@ -162,7 +162,17 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                         pending_translation = last_trans if parse_end(last_line.get("end")) > accumulated_translation_end else ""
 
                 async def send_audio():
-                    """Stream audio chunks to the websocket."""
+                    """Stream audio chunks to the websocket.
+
+                    When speed > 0, audio is paced so it streams at `speed` x
+                    real-time (1.0 = live microphone behaviour). speed = 0
+                    keeps the legacy fire-hose behaviour (send as fast as
+                    possible), which produces server-side chunk sizes that
+                    never occur in production.
+                    """
+                    bytes_per_second = 32000  # 16 kHz mono s16le
+                    audio_clock = 0.0         # seconds of audio sent so far
+                    wall_start = time.time()
                     for sample in chapter_samples:
                         process = await asyncio.create_subprocess_exec(
                             "ffmpeg", "-i", sample['audio_path'],
@@ -180,7 +190,13 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                             await websocket.send(chunk)
                             if debug:
                                 print(f"[DEBUG] Sent chunk {i} for group {group_id}")
-                            if i % 10000 == 0:
+                            if speed > 0:
+                                audio_clock += len(chunk) / bytes_per_second
+                                target_wall = wall_start + audio_clock / speed
+                                delay = target_wall - time.time()
+                                if delay > 0:
+                                    await asyncio.sleep(delay)
+                            elif i % 10000 == 0:
                                 await asyncio.sleep(0.05)
 
                     # Send End of Stream signal (Empty Bytes)
@@ -300,8 +316,9 @@ if __name__ == "__main__":
     parser.add_argument("--output", default="benchmark_results.json", help="Output file for results")
     parser.add_argument("--debug", action="store_true", help="Enable verbose debug logging")
     parser.add_argument("--translate", action="store_true", help="Collect translation output from the server and save to a separate file")
+    parser.add_argument("--speed", type=float, default=0.0, help="Audio streaming speed factor: 0 = send as fast as possible (default), 1.0 = real-time (matches production)")
     args = parser.parse_args()
-    
+
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate, speed=args.speed))
