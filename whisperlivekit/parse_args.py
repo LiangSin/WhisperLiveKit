@@ -345,6 +345,21 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--pending-translation-interval",
+        type=float,
+        default=1.5,
+        dest="pending_translation_interval",
+        help=(
+            "Seconds between provisional translations of the still-open (pending) "
+            "sentence when using --translation-model translategemma. The pending "
+            "text is re-translated whenever it changed since the last tick, so "
+            "translated captions keep up with speech instead of waiting for a "
+            "sentence boundary. Set to 0 to disable and translate only "
+            "SaT-completed sentences."
+        ),
+    )
+
+    parser.add_argument(
         "--sentence-detection",
         action="store_true",
         default=False,

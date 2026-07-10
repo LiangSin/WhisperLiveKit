@@ -40,7 +40,7 @@ class StreamingSentenceDetector:
         Force-flush when pending tokens exceed this count.
     """
 
-    def __init__(self, sat_model=None, max_tokens: int = 30):
+    def __init__(self, sat_model=None, max_tokens: int = 60):
         if sat_model is not None:
             self.sat = sat_model
         else:
@@ -166,7 +166,10 @@ class SentenceDetectionProcessor:
     translation_sentence_queue:
         Optional queue to forward sentences for offline translation.
     hallucination_reset:
-        Object that signals hallucination detected upstream; clears state. 
+        Object that signals hallucination detected upstream; clears state.
+    pending_translation_interval:
+        Seconds between provisional translations of the still-open (pending)
+        sentence. <= 0 disables the periodic pending translation.
     """
 
     def __init__(
@@ -178,6 +181,7 @@ class SentenceDetectionProcessor:
         sentinel: object,
         translation_sentence_queue: Optional[asyncio.Queue] = None,
         hallucination_reset: Optional[object] = None,
+        pending_translation_interval: float = 1.5,
     ):
         self.detector = detector
         self.sat_queue = sat_queue
@@ -186,8 +190,11 @@ class SentenceDetectionProcessor:
         self.sentinel = sentinel
         self.translation_sentence_queue = translation_sentence_queue
         self.hallucination_reset = hallucination_reset
+        self.pending_translation_interval = pending_translation_interval
         self._silence_started_at: Optional[float] = None
         self._silence_flushed = False
+        self._pending_translation_task: Optional[asyncio.Task] = None
+        self._last_pending_key = None
 
     async def _flush_pending_sentence(self):
         sentence = await asyncio.to_thread(self.detector.flush)
@@ -195,18 +202,60 @@ class SentenceDetectionProcessor:
             if sentence:
                 self.state.sentence_segments.append(sentence)
             self.state.sentence_pending = None
+        self._last_pending_key = None
         if sentence and self.translation_sentence_queue:
             await self.translation_sentence_queue.put((sentence, False))
         self._silence_flushed = True
 
+    async def _pending_translation_ticker(self):
+        """Periodically enqueue a snapshot of the pending sentence for
+        provisional translation, so translated captions keep up with speech
+        instead of waiting for a SaT boundary."""
+        while True:
+            await asyncio.sleep(self.pending_translation_interval)
+            async with self.lock:
+                pending = self.state.sentence_pending
+                snapshot = (
+                    Sentence(start=pending.start, end=pending.end, text=pending.text)
+                    if pending and (pending.text or "").strip()
+                    else None
+                )
+            if snapshot is None:
+                continue
+            key = (snapshot.start, snapshot.text)
+            if key == self._last_pending_key:
+                continue
+            self._last_pending_key = key
+            await self.translation_sentence_queue.put((snapshot, True))
+
+    async def _stop_pending_translation_ticker(self):
+        if self._pending_translation_task is not None:
+            self._pending_translation_task.cancel()
+            await asyncio.gather(self._pending_translation_task, return_exceptions=True)
+            self._pending_translation_task = None
+
     async def run(self):
         """Main processing loop — run as an ``asyncio.Task``."""
+        if self.translation_sentence_queue and self.pending_translation_interval > 0:
+            self._pending_translation_task = asyncio.create_task(
+                self._pending_translation_ticker()
+            )
+        try:
+            await self._run_loop()
+        finally:
+            await self._stop_pending_translation_ticker()
+        logger.info("SentenceDetectionProcessor finished.")
+
+    async def _run_loop(self):
         while True:
             try:
                 item = await self.sat_queue.get()
 
                 if item is self.sentinel:
                     logger.debug("SentenceDetectionProcessor: sentinel received, flushing.")
+                    # Stop the ticker before the sentinel so no pending item
+                    # lands in the translation queue after end-of-stream.
+                    await self._stop_pending_translation_ticker()
                     await self._flush_pending_sentence()
                     if self.translation_sentence_queue:
                         await self.translation_sentence_queue.put(self.sentinel)
@@ -217,6 +266,8 @@ class SentenceDetectionProcessor:
                     self.detector.reset()
                     async with self.lock:
                         self.state.sentence_pending = None
+                        self.state.translation_pending = None
+                    self._last_pending_key = None
                     self._silence_started_at = None
                     self._silence_flushed = False
                     self.sat_queue.task_done()
@@ -259,8 +310,6 @@ class SentenceDetectionProcessor:
                 logger.warning("Exception in SentenceDetectionProcessor: %s", e)
                 logger.debug("Traceback: %s", traceback.format_exc())
                 self.sat_queue.task_done()
-
-        logger.info("SentenceDetectionProcessor finished.")
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +387,23 @@ def format_sentence_lines(state, args, tokens=None):
                     else:
                         remaining.append(ts)
                 unassigned = remaining
+
+    # Provisional (pending) translation: attach to the line that shares its
+    # exact start. Usually that is the pending (last) line; right after a SaT
+    # cut it is the just-finalized sentence, which keeps the provisional text
+    # on screen until the validated translation replaces it — instead of the
+    # translation blinking out. A stale snapshot from an older generation
+    # matches no line and is dropped.
+    translation_pending = getattr(state, "translation_pending", None)
+    if translation_pending and (translation_pending.text or "").strip():
+        for line in reversed(lines):
+            if line.start == translation_pending.start:
+                if not line.translation:
+                    line.translation = translation_pending.text
+                    line.translation_provisional = True
+                break
+            if line.start < translation_pending.start:
+                break
 
     # if lines and translation_segs:
     #     latest_transcription_end = lines[-1].end

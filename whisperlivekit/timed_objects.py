@@ -132,6 +132,9 @@ class Silence():
 @dataclass
 class Line(TimedText):
     translation: str = ''
+    # True while `translation` is a provisional (pending) translation that a
+    # validated one will replace; display-only, never archived, not on the wire.
+    translation_provisional: bool = False
     
     def to_dict(self):
         _dict = {
@@ -192,3 +195,4 @@ class State():
     beg_loop: Optional[int] = None
     sentence_segments: deque = field(default_factory=lambda: deque(maxlen=200))
     sentence_pending: Optional["Sentence"] = None  # In-progress sentence (may update); propagated for display
+    translation_pending: Optional["Translation"] = None  # Provisional translation of sentence_pending; superseded by validated segments

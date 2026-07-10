@@ -205,6 +205,9 @@ class AudioProcessor:
                     sentinel=SENTINEL,
                     translation_sentence_queue=self.translation_queue,
                     hallucination_reset=HALLUCINATION_RESET,
+                    pending_translation_interval=getattr(
+                        self.args, "pending_translation_interval", 1.5
+                    ),
                 )
             else:
                 self._sentence_proc = SentenceDetectionProcessor(

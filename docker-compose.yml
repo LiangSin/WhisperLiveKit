@@ -51,6 +51,7 @@ services:
       --translation-model ${WLK_TRANSLATION_MODEL:-translategemma}
       --translation-model-size ${WLK_TRANSLATION_MODEL_SIZE:-4b}
       --translategemma-url ${WLK_TRANSLATEGEMMA_URL:-https://translategemma:8000/v1}
+      --pending-translation-interval ${WLK_PENDING_TRANSLATION_INTERVAL:-1.5}
       ${WLK_TARGET_LANGUAGE_ARG:-}
       ${WLK_SENTENCE_DETECTION_FLAG:-}
       ${WLK_ALLOWED_IPS_ARG:-}

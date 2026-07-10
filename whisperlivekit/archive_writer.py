@@ -197,8 +197,11 @@ class ConnectionArchiveWriter:
         for line in stable_lines:
             start, end, text = self._line_tuple(line)
             self._write_transcript_cue(start, end, text)
-            tr_start, tr_end, tr_text = self._translation_tuple(line)
-            self._write_translation_cue(tr_start, tr_end, tr_text)
+            # Provisional (pending) translations are display-only; only the
+            # validated translation belongs in the archive.
+            if not getattr(line, "translation_provisional", False):
+                tr_start, tr_end, tr_text = self._translation_tuple(line)
+                self._write_translation_cue(tr_start, tr_end, tr_text)
         self.flush_subtitles_if_due()
 
     def flush_subtitles_if_due(self, force: bool = False) -> None:

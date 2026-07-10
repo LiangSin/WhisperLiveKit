@@ -127,8 +127,14 @@ class TranslateGemmaClient:
             ),
         }]
 
-    async def translate(self, text: str) -> str:
-        """Translate *text* from src_lang to tgt_lang via the remote server."""
+    async def translate(self, text: str, prefix: Optional[str] = None) -> str:
+        """Translate *text* from src_lang to tgt_lang via the remote server.
+
+        When *prefix* is given, the decoder is forced to continue from it
+        (vLLM ``continue_final_message``) and only the continuation is
+        returned, without stripping — the caller stitches ``prefix +
+        continuation`` and relies on exact character alignment across calls.
+        """
         text = (text or "").strip()
         if not text:
             return ""
@@ -141,6 +147,12 @@ class TranslateGemmaClient:
             "max_tokens": self.max_tokens,
             "stop": ["<eos>", "<end_of_turn>"],
         }
+        if prefix:
+            payload["messages"] = payload["messages"] + [
+                {"role": "assistant", "content": prefix}
+            ]
+            payload["add_generation_prompt"] = False
+            payload["continue_final_message"] = True
 
         async with self._semaphore:
             response = await client.post(
@@ -148,7 +160,8 @@ class TranslateGemmaClient:
             )
         response.raise_for_status()
         data = response.json()
-        return data["choices"][0]["message"]["content"].strip()
+        content = data["choices"][0]["message"]["content"]
+        return content if prefix else content.strip()
 
     async def translate_batch(self, texts: List[str]) -> List[str]:
         """Translate *texts* concurrently. vLLM batches them on the server side."""
@@ -167,6 +180,48 @@ class TranslateGemmaClient:
         for idx, translation in zip(indices, translations):
             results[idx] = translation
         return results
+
+
+# ---------------------------------------------------------------------------
+# Display-stability helpers (nllw-style local agreement)
+# ---------------------------------------------------------------------------
+
+def _is_safe_cut_char(ch: str) -> bool:
+    """Whether the frozen prefix may end right after this character.
+
+    Freezing mid-word (latin scripts) risks forcing a broken decoder prefix,
+    so we only cut after whitespace, punctuation, or CJK characters.
+    """
+    if ch.isspace():
+        return True
+    cp = ord(ch)
+    if 0x3000 <= cp <= 0x9FFF or 0xF900 <= cp <= 0xFAFF or 0xFF00 <= cp <= 0xFFEF:
+        return True  # CJK ideographs, kana, fullwidth forms
+    return not ch.isalnum()
+
+
+def promotable_prefix_length(prev_tail: str, new_tail: str) -> int:
+    """Local agreement: length of ``new_tail``'s head that may be frozen.
+
+    Two consecutive re-translations must agree character-by-character, and
+    the cut is pulled back to the last safe boundary inside the agreed span.
+    """
+    agreed = 0
+    for a, b in zip(prev_tail, new_tail):
+        if a != b:
+            break
+        agreed += 1
+    cut = 0
+    for i in range(agreed):
+        if _is_safe_cut_char(new_tail[i]):
+            cut = i + 1
+    # Keep trailing whitespace out of the frozen prefix: a forced prefix that
+    # ends with a space makes the model emit another one ("The weather  is"),
+    # and leaving the space at the head of the tail keeps successive
+    # continuations aligned character-by-character.
+    while cut > 0 and new_tail[cut - 1].isspace():
+        cut -= 1
+    return cut
 
 
 # ---------------------------------------------------------------------------
@@ -206,6 +261,40 @@ class GemmaTranslationProcessor:
         self.state = state
         self.lock = lock
         self.sentinel = sentinel
+        # Stable-prefix state for the current pending-sentence generation
+        # (nllw-style): the frozen head of the provisional translation only
+        # ever grows, so the displayed caption does not jump around between
+        # re-translations. Keyed by the pending sentence's start time.
+        self._pending_gen_start: Optional[float] = None
+        self._stable_prefix: str = ""
+        self._prev_tail: str = ""
+
+    def _reset_pending_generation(self, gen_start: Optional[float]) -> None:
+        self._pending_gen_start = gen_start
+        self._stable_prefix = ""
+        self._prev_tail = ""
+
+    async def _translate_pending(self, pending_sentence) -> str:
+        """Re-translate the pending sentence with a frozen stable prefix.
+
+        Returns the full display text (stable prefix + tentative tail). The
+        stable prefix grows by local agreement: the part of the tail on which
+        two consecutive re-translations agree gets frozen, and later requests
+        force the decoder to continue from it (vLLM ``continue_final_message``),
+        so it can never be rewritten.
+        """
+        if pending_sentence.start != self._pending_gen_start:
+            self._reset_pending_generation(pending_sentence.start)
+
+        continuation = await self.client.translate(
+            pending_sentence.text, prefix=self._stable_prefix or None
+        )
+        cut = promotable_prefix_length(self._prev_tail, continuation)
+        if cut:
+            self._stable_prefix += continuation[:cut]
+            continuation = continuation[cut:]
+        self._prev_tail = continuation
+        return (self._stable_prefix + continuation).strip()
 
     async def run(self):
         """Main processing loop — run as an asyncio.Task."""
@@ -233,41 +322,68 @@ class GemmaTranslationProcessor:
 
                 sentinel_found = False
                 sentences = []
+                pending_sentence = None
                 for it in items:
                     if it is self.sentinel:
                         sentinel_found = True
                         break
                     sentence, is_pending = it
-                    if is_pending:
-                        continue
                     if not (sentence.text or "").strip():
                         continue
-                    sentences.append(sentence)
+                    if is_pending:
+                        # Later snapshots supersede earlier ones within a batch.
+                        pending_sentence = sentence
+                    else:
+                        sentences.append(sentence)
+                        # A finalized sentence enqueued after a pending snapshot
+                        # consumed that snapshot's text — the snapshot is stale.
+                        pending_sentence = None
 
-                if sentences:
-                    try:
-                        results = await asyncio.gather(
-                            *[self.client.translate(s.text) for s in sentences]
-                        )
-                        translations = [
-                            Translation(
-                                start=s.start,
-                                end=s.end,
-                                text=r.strip(),
+                if sentences or pending_sentence:
+                    tasks = [self.client.translate(s.text) for s in sentences]
+                    if pending_sentence:
+                        tasks.append(self._translate_pending(pending_sentence))
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    translations = []
+                    for s, r in zip(sentences, results[:len(sentences)]):
+                        if isinstance(r, BaseException):
+                            logger.warning(
+                                "Gemma translation error for sentence %r: %s",
+                                s.text[:60], r,
                             )
-                            for s, r in zip(sentences, results)
-                        ]
-                        async with self.lock:
+                            continue
+                        translations.append(
+                            Translation(start=s.start, end=s.end, text=r.strip())
+                        )
+
+                    pending_translation = None
+                    if pending_sentence:
+                        r = results[-1]
+                        if isinstance(r, BaseException):
+                            # Stable-prefix state is only mutated on success;
+                            # the next tick simply retries.
+                            logger.warning("Gemma pending translation error: %s", r)
+                        elif r:
+                            pending_translation = Translation(
+                                start=pending_sentence.start,
+                                end=pending_sentence.end,
+                                text=r,
+                            )
+
+                    async with self.lock:
+                        if translations:
                             existing = self.state.translation_validated_segments
                             if not isinstance(existing, list):
                                 existing = [existing] if existing else []
                             existing.extend(translations)
                             self.state.translation_validated_segments = existing[-200:]
-                    except Exception as e:
-                        logger.warning(
-                            "Gemma translation error for batch of %d: %s",
-                            len(sentences), e,
-                        )
+                            # Any provisional translation predates these
+                            # finalized sentences (queue order) — the validated
+                            # translation replaces it atomically here.
+                            self.state.translation_pending = None
+                        if pending_translation is not None:
+                            self.state.translation_pending = pending_translation
 
                 for _ in items:
                     self.translation_sentence_queue.task_done()
