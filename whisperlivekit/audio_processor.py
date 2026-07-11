@@ -443,22 +443,56 @@ class AudioProcessor:
     async def transcription_processor(self):
         """Process audio chunks for transcription."""
         cumulative_pcm_duration_stream_time = 0.0
-        
+        # Accumulate at least min_chunk_size of audio before decoding.
+        # Control events (Silence/SENTINEL/...) flush the accumulator
+        # first so boundaries keep their position.
+        min_process_samples = int(self.sample_rate * self.args.min_chunk_size)
+        pending_audio = []
+        pending_samples = 0
+        carry_item = None
+
         while True:
             try:
-                # Use a timeout so we periodically wake up and refresh the
-                # buffer state even when no audio is flowing (e.g. silence).
-                try:
-                    item = await asyncio.wait_for(
-                        get_all_from_queue(self.transcription_queue),
-                        timeout=0.5,
-                    )
-                except asyncio.TimeoutError:
-                    # No new audio — just refresh buffer state
-                    _buffer_transcript = self.transcription.get_buffer()
-                    async with self.lock:
-                        self.state.buffer_transcription = _buffer_transcript
-                    continue
+                if carry_item is not None:
+                    item = carry_item
+                    carry_item = None
+                else:
+                    # Use a timeout so we periodically wake up and refresh the
+                    # buffer state even when no audio is flowing (e.g. silence).
+                    try:
+                        item = await asyncio.wait_for(
+                            get_all_from_queue(self.transcription_queue),
+                            timeout=0.5,
+                        )
+                    except asyncio.TimeoutError:
+                        if pending_audio:
+                            # Audio stopped mid-accumulation (e.g. speech just
+                            # ended): decode the partial quantum now.
+                            item = np.concatenate(pending_audio)
+                            pending_audio = []
+                            pending_samples = 0
+                        else:
+                            # No new audio — just refresh buffer state
+                            _buffer_transcript = self.transcription.get_buffer()
+                            async with self.lock:
+                                self.state.buffer_transcription = _buffer_transcript
+                            continue
+
+                if isinstance(item, np.ndarray):
+                    pending_audio.append(item)
+                    pending_samples += len(item)
+                    if pending_samples < min_process_samples:
+                        continue
+                    item = np.concatenate(pending_audio)
+                    pending_audio = []
+                    pending_samples = 0
+                elif pending_audio:
+                    # A control event arrived while audio is buffered: decode
+                    # the buffered audio first, then handle the event.
+                    carry_item = item
+                    item = np.concatenate(pending_audio)
+                    pending_audio = []
+                    pending_samples = 0
 
                 if item is SENTINEL:
                     logger.debug("Transcription processor received sentinel. Finishing.")
