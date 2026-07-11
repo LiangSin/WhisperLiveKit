@@ -40,7 +40,8 @@ class StreamingSentenceDetector:
         Force-flush when pending tokens exceed this count.
     """
 
-    def __init__(self, sat_model=None, max_tokens: int = 60):
+    def __init__(self, sat_model=None, max_tokens: int = 60,
+                 soft_max_tokens: int = 40, soft_min_prob: float = 0.01):
         if sat_model is not None:
             self.sat = sat_model
         else:
@@ -50,6 +51,8 @@ class StreamingSentenceDetector:
             self.sat.half().to(device)
 
         self.max_tokens = max_tokens
+        self.soft_max_tokens = soft_max_tokens
+        self.soft_min_prob = soft_min_prob
         self.pending_tokens: List[ASRToken] = []
 
     # ------------------------------------------------------------------
@@ -59,18 +62,49 @@ class StreamingSentenceDetector:
     def push(self, new_tokens: List[ASRToken]) -> List[Sentence]:
         """
         Append newly validated tokens and return sentences.
+
+        Split strategy (progressive):
+        1. Default threshold — use whatever SaT finds naturally.
+        2. Soft limit: use predict_proba to find the single best
+           split point. Split only if its probability exceeds soft_min_prob.
+        3. Hard limit: same predict_proba argmax, but split unconditionally.
+           Falls back to character midpoint only if every position has
+           probability 0.
         """
         self.pending_tokens.extend(t for t in new_tokens if t.text)
-
-        # Concatenate token texts.
         pending_text = "".join(t.text for t in self.pending_tokens)
+        n_tokens = len(self.pending_tokens)
+
         segments = self.sat.split(pending_text)
 
-        if len(self.pending_tokens) >= self.max_tokens and len(segments) < 2:
-            mid_char = len(pending_text) // 2
-            segments = [pending_text[:mid_char], pending_text[mid_char:]]
+        if len(segments) < 2 and n_tokens >= self.soft_max_tokens:
+            split = self._best_split_point(pending_text)
+            if split is not None and split[1] >= self.soft_min_prob:
+                segments = [pending_text[:split[0] + 1], pending_text[split[0] + 1:]]
+                logger.debug("Soft limit split: %s", segments)
+
+        if len(segments) < 2 and n_tokens >= self.max_tokens:
+            split = self._best_split_point(pending_text)
+            if split is not None:
+                segments = [pending_text[:split[0] + 1], pending_text[split[0] + 1:]]
+                logger.debug("Hard limit split: %s", segments)
+            else:
+                mid = len(pending_text) // 2
+                segments = [pending_text[:mid], pending_text[mid:]]
+                logger.debug("Midpoint split: %s", segments)
 
         return self._extract_sentences(segments)
+
+    def _best_split_point(self, text: str):
+        """Return (char_index, probability) of the best split in the first 80%,
+        or None if every position has probability 0."""
+        import numpy as np
+        probs = self.sat.predict_proba(text)
+        cutoff = max(1, int(len(text) * 0.8))
+        best = int(np.argmax(probs[:cutoff]))
+        if probs[best] < 1e-6:
+            return None
+        return (best, float(probs[best]))
 
     def flush(self) -> Optional[Sentence]:
         """
