@@ -157,7 +157,7 @@ def parse_args():
         help="VAC backend to use: 'silero' (default, requires torch + model files) or 'ten-vad' (requires pip install ten-vad).",
     )
     parser.add_argument(
-        "--vac-chunk-size", type=float, default=0.04, help="VAC sample size in seconds."
+        "--vac-chunk-size", type=float, default=0.2, help="VAC sample size in seconds."
     )
 
     parser.add_argument(

@@ -47,7 +47,7 @@ class TranscriptionEngine:
             "target_language": "",
             "vac": True,
             "vac_backend": "silero",
-            "vac_chunk_size": 0.04,
+            "vac_chunk_size": 0.2,
             "vad_threshold": 0.5,
             "log_level": "DEBUG",
             "ssl_certfile": None,
