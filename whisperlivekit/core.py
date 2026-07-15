@@ -251,11 +251,20 @@ class TranscriptionEngine:
         TranscriptionEngine._initialized = True
 
 
-def online_factory(args, asr):
-    if args.backend_policy == "simulstreaming":    
+def online_factory(args, asr, init_prompt=None, static_init_prompt=None):
+    if args.backend_policy == "simulstreaming":
         from whisperlivekit.simul_whisper import SimulStreamingOnlineProcessor
-        online = SimulStreamingOnlineProcessor(asr)
+        online = SimulStreamingOnlineProcessor(
+            asr,
+            init_prompt=init_prompt,
+            static_init_prompt=static_init_prompt,
+        )
     else:
+        if init_prompt is not None or static_init_prompt is not None:
+            logger.warning(
+                "Per-connection prompts are only supported with the "
+                "simulstreaming backend policy; ignoring them."
+            )
         online = OnlineASRProcessor(asr)
     return online
   

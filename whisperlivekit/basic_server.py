@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from whisperlivekit import TranscriptionEngine, AudioProcessor, get_inline_ui_html, parse_args
 from whisperlivekit.ip_middleware import create_ip_middleware
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
@@ -106,9 +107,7 @@ async def websocket_endpoint(websocket: WebSocket):
     audio_processor_kwargs = {"transcription_engine": transcription_engine}
     if getattr(args, "archive_enabled", False):
         audio_processor_kwargs["session_dir_name"] = _build_session_dir_name(args.archive_dir)
-    audio_processor = AudioProcessor(
-        **audio_processor_kwargs,
-    )
+
     await websocket.accept()
     logger.info("WebSocket connection opened.")
 
@@ -116,14 +115,62 @@ async def websocket_endpoint(websocket: WebSocket):
         await websocket.send_json({"type": "config", "useAudioWorklet": bool(args.pcm_input)})
     except Exception as e:
         logger.warning(f"Failed to send config to client: {e}")
-            
-    results_generator = await audio_processor.create_tasks()
-    websocket_task = asyncio.create_task(handle_websocket_results(websocket, results_generator))
+
+    # The AudioProcessor is created lazily on the first audio chunk so that
+    # an optional client config message (a JSON text frame sent before any
+    # audio) can customize the session, e.g. per-connection prompts.
+    audio_processor = None
+    websocket_task = None
+
+    async def handle_client_config(text):
+        try:
+            control = json.loads(text)
+        except json.JSONDecodeError:
+            logger.warning("Ignoring non-JSON text frame from client.")
+            return
+        if not isinstance(control, dict) or control.get("type") != "config":
+            logger.warning(f"Ignoring unknown client message: {control!r}")
+            return
+        if audio_processor is not None:
+            logger.warning("Client config received after audio started; ignoring.")
+            await websocket.send_json({
+                "type": "config_error",
+                "message": "config must be sent before the first audio chunk",
+            })
+            return
+        applied = {}
+        for key in ("init_prompt", "static_init_prompt"):
+            if key in control and control[key] is not None:
+                value = control[key]
+                if not isinstance(value, str):
+                    await websocket.send_json({
+                        "type": "config_error",
+                        "message": f"{key} must be a string",
+                    })
+                    return
+                audio_processor_kwargs[key] = value
+                applied[key] = value
+        await websocket.send_json({"type": "config_ack", "applied": applied})
+        logger.info(f"Applied client session config: {applied}")
 
     try:
         while True:
-            message = await websocket.receive_bytes()
-            await audio_processor.process_audio(message)
+            message = await websocket.receive()
+            if message["type"] == "websocket.disconnect":
+                raise WebSocketDisconnect(message.get("code") or 1000)
+            if message.get("text") is not None:
+                await handle_client_config(message["text"])
+                continue
+            data = message.get("bytes")
+            if data is None:
+                continue
+            if audio_processor is None:
+                audio_processor = AudioProcessor(**audio_processor_kwargs)
+                results_generator = await audio_processor.create_tasks()
+                websocket_task = asyncio.create_task(
+                    handle_websocket_results(websocket, results_generator)
+                )
+            await audio_processor.process_audio(data)
     except KeyError as e:
         if 'bytes' in str(e):
             logger.warning(f"Client has closed the connection.")
@@ -135,16 +182,18 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.error(f"Unexpected error in websocket_endpoint main loop: {e}", exc_info=True)
     finally:
         logger.info("Cleaning up WebSocket endpoint...")
-        if not websocket_task.done():
-            websocket_task.cancel()
-        try:
-            await websocket_task
-        except asyncio.CancelledError:
-            logger.info("WebSocket results handler task was cancelled.")
-        except Exception as e:
-            logger.warning(f"Exception while awaiting websocket_task completion: {e}")
-            
-        await audio_processor.cleanup()
+        if websocket_task is not None:
+            if not websocket_task.done():
+                websocket_task.cancel()
+            try:
+                await websocket_task
+            except asyncio.CancelledError:
+                logger.info("WebSocket results handler task was cancelled.")
+            except Exception as e:
+                logger.warning(f"Exception while awaiting websocket_task completion: {e}")
+
+        if audio_processor is not None:
+            await audio_processor.cleanup()
         logger.info("WebSocket endpoint cleaned up successfully.")
 
 def main():

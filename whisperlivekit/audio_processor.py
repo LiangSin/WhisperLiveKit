@@ -252,8 +252,13 @@ class AudioProcessor:
                 )
 
         if self.args.transcription:
-            self.transcription = online_factory(self.args, models.asr)        
-            self.sep = self.transcription.asr.sep   
+            self.transcription = online_factory(
+                self.args,
+                models.asr,
+                init_prompt=kwargs.get("init_prompt"),
+                static_init_prompt=kwargs.get("static_init_prompt"),
+            )
+            self.sep = self.transcription.asr.sep
         if self.args.diarization:
             self.diarization = online_diarization_factory(self.args, models.diarization_model)
         if models.translation_model:

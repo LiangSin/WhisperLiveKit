@@ -1,6 +1,7 @@
 import sys
 import numpy as np
 import logging
+from dataclasses import replace
 from typing import List, Tuple, Optional
 import platform
 from whisperlivekit.timed_objects import ASRToken, Transcript, ChangeSpeaker
@@ -53,9 +54,21 @@ class SimulStreamingOnlineProcessor:
         self,
         asr,
         logfile=sys.stderr,
+        init_prompt=None,
+        static_init_prompt=None,
     ):
         self.asr = asr
         self.logfile = logfile
+        # Per-session prompt overrides: None means "inherit the server-wide
+        # value from asr.cfg"; an empty string explicitly clears it.
+        overrides = {}
+        if init_prompt is not None:
+            overrides["init_prompt"] = init_prompt
+        if static_init_prompt is not None:
+            overrides["static_init_prompt"] = static_init_prompt
+        self.cfg = replace(asr.cfg, **overrides) if overrides else asr.cfg
+        if overrides:
+            logger.info(f"Session prompt overrides: {overrides}")
         self.end = 0.0
         self.buffer = []
         self.committed: List[ASRToken] = []
@@ -73,7 +86,7 @@ class SimulStreamingOnlineProcessor:
         tokens, context), so creating one per connection is cheap.
         """
         self.model = AlignAtt(
-            cfg=self.asr.cfg,
+            cfg=self.cfg,
             loaded_model=self.asr.shared_model,
             mlx_encoder=self.asr.mlx_encoder,
             fw_encoder=self.asr.fw_encoder,
