@@ -201,9 +201,11 @@ class SentenceDetectionProcessor:
         Optional queue to forward sentences for offline translation.
     hallucination_reset:
         Object that signals hallucination detected upstream; clears state.
+    translate_pending:
+        Whether to translate the still-open (pending) sentence in real time.
     pending_translation_interval:
-        Seconds between provisional translations of the still-open (pending)
-        sentence. <= 0 disables the periodic pending translation.
+        Seconds between provisional translations of the pending sentence.
+        Only effective when ``translate_pending`` is True.
     """
 
     def __init__(
@@ -215,6 +217,7 @@ class SentenceDetectionProcessor:
         sentinel: object,
         translation_sentence_queue: Optional[asyncio.Queue] = None,
         hallucination_reset: Optional[object] = None,
+        translate_pending: bool = False,
         pending_translation_interval: float = 1.5,
     ):
         self.detector = detector
@@ -224,6 +227,7 @@ class SentenceDetectionProcessor:
         self.sentinel = sentinel
         self.translation_sentence_queue = translation_sentence_queue
         self.hallucination_reset = hallucination_reset
+        self.translate_pending = translate_pending
         self.pending_translation_interval = pending_translation_interval
         self._silence_started_at: Optional[float] = None
         self._silence_flushed = False
@@ -270,7 +274,7 @@ class SentenceDetectionProcessor:
 
     async def run(self):
         """Main processing loop — run as an ``asyncio.Task``."""
-        if self.translation_sentence_queue and self.pending_translation_interval > 0:
+        if self.translation_sentence_queue and self.translate_pending and self.pending_translation_interval > 0:
             self._pending_translation_task = asyncio.create_task(
                 self._pending_translation_ticker()
             )
