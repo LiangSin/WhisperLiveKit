@@ -16,6 +16,7 @@ services:
       dockerfile: Dockerfile
     image: translategemma:local
     container_name: translategemma
+    restart: unless-stopped
     runtime: nvidia
     deploy:
       resources:

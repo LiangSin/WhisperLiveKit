@@ -19,6 +19,7 @@ services:
         COOL_WHISPER_SNAPSHOT_DIR: ${COOL_WHISPER_SNAPSHOT_DIR}
     image: whisperlivekit:local
     container_name: whisperlivekit
+    restart: unless-stopped
     runtime: nvidia
     deploy:
       resources:
