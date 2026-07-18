@@ -207,6 +207,6 @@ class State():
     beg_loop: Optional[int] = None
     # Long (> MIN_DURATION_REAL_SILENCE) silences recorded by the VAD, same as main.
     new_tokens: List[Union[ASRToken, Silence]] = field(default_factory=list)
-    sentence_segments: deque = field(default_factory=lambda: deque(maxlen=200))
+    sentence_segments: deque = field(default_factory=lambda: deque(maxlen=50))
     sentence_pending: Optional["Sentence"] = None  # In-progress sentence (may update); propagated for display
     translation_pending: Optional["Translation"] = None  # Provisional translation of sentence_pending; superseded by validated segments

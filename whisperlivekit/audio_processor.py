@@ -20,8 +20,8 @@ logger.setLevel(logging.DEBUG)
 SENTINEL = object() # unique sentinel object for end of stream marker
 HALLUCINATION_RESET = object()  # signals SaT/Gemma to clear state when hallucination detected
 
-_TOKENS_TRIM_THRESHOLD = 1500
-_TOKENS_KEEP = 1000
+_TOKENS_TRIM_THRESHOLD = 1000
+_TOKENS_KEEP = 750
 
 def cut_at(cumulative_pcm, cut_sec):
     cumulative_len = 0
@@ -945,7 +945,7 @@ class AudioProcessor:
                     logger.info("Results formatter: All upstream processors are done and in stopping state. Terminating.")
                     return
                 
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.2)
                 
             except Exception as e:
                 logger.warning(f"Exception in results_formatter. Traceback: {traceback.format_exc()}")

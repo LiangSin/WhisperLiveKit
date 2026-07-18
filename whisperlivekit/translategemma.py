@@ -377,7 +377,9 @@ class GemmaTranslationProcessor:
                             if not isinstance(existing, list):
                                 existing = [existing] if existing else []
                             existing.extend(translations)
-                            self.state.translation_validated_segments = existing[-200:]
+                            # Keep in sync with State.sentence_segments maxlen: translations
+                            # can only attach to sentences still in that window.
+                            self.state.translation_validated_segments = existing[-50:]
                             # Any provisional translation predates these
                             # finalized sentences (queue order) — the validated
                             # translation replaces it atomically here.
