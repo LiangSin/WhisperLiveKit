@@ -76,6 +76,32 @@ else
   info "models/cool-whisper already exists. Skipping download."
 fi
 
+# CTranslate2 encoder weights: with model.bin + vocabulary.json present next to
+# the PyTorch weights (2-4x faster than the PyTorch encoder).
+MODEL_DIR="$(readlink -f "$TARGET_LINK")"
+if [[ -f "$MODEL_DIR/model.bin" ]]; then
+  info "CTranslate2 weights already exist in $MODEL_DIR. Skipping conversion."
+else
+  info "Converting cool-whisper to CTranslate2 format (float16)..."
+  if ! command -v ct2-transformers-converter >/dev/null 2>&1; then
+    info "Installing ctranslate2 + transformers for the conversion..."
+    pip install ctranslate2 transformers
+  fi
+  CT2_TMP_DIR="$(mktemp -d)"
+  # The converter refuses to write into a non-empty directory, so convert to a
+  # temp dir and move only the CT2 artifacts next to the PyTorch weights.
+  if ct2-transformers-converter --model "$MODEL_DIR" \
+      --output_dir "$CT2_TMP_DIR/cool-whisper-ct2" --quantization float16; then
+    mv "$CT2_TMP_DIR/cool-whisper-ct2/model.bin" \
+       "$CT2_TMP_DIR/cool-whisper-ct2/vocabulary.json" "$MODEL_DIR/"
+    rm -rf "$CT2_TMP_DIR"
+    success "CTranslate2 weights installed in $MODEL_DIR"
+  else
+    rm -rf "$CT2_TMP_DIR"
+    warn "CTranslate2 conversion failed; the server will fall back to the PyTorch encoder."
+  fi
+fi
+
 info "Checking for SSL certificates..."
 if [[ ! -f "ssl-config/key.pem" ]] || [[ ! -f "ssl-config/cert.pem" ]]; then
   info "SSL certificates not found. Generating self-signed certificates..."
