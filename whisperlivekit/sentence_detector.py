@@ -37,7 +37,10 @@ class StreamingSentenceDetector:
         A pre-loaded ``wtpsplit.SaT`` instance shared across connections.
         If *None*, a new ``sat-3l-sm`` model is loaded locally.
     max_tokens:
-        Force-flush when pending tokens exceed this count.
+        Hard limit: split unconditionally when pending tokens exceed this count.
+    soft_max_tokens:
+        Soft limit: split at the best SaT point (if probable enough) when
+        pending tokens exceed this count.
     """
 
     def __init__(self, sat_model=None, max_tokens: int = 60,

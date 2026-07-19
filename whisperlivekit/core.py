@@ -65,6 +65,8 @@ class TranscriptionEngine:
             "translate_pending": False,
             "pending_translation_interval": 1.5,
             "sentence_detection": False,
+            "sat_soft_max_tokens": 40,
+            "sat_max_tokens": 60,
             "archive_enabled": True,
             "archive_dir": "archives",
             "archive_segment_seconds": 1800.0,

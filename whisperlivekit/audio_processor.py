@@ -279,7 +279,11 @@ class AudioProcessor:
                 StreamingSentenceDetector,
                 SentenceDetectionProcessor,
             )
-            self.sentence_detector = StreamingSentenceDetector(sat_model=models.sat_model)
+            self.sentence_detector = StreamingSentenceDetector(
+                sat_model=models.sat_model,
+                max_tokens=getattr(self.args, "sat_max_tokens", 60),
+                soft_max_tokens=getattr(self.args, "sat_soft_max_tokens", 40),
+            )
             if self.use_offline_translation:
                 self._sentence_proc = SentenceDetectionProcessor(
                     detector=self.sentence_detector,

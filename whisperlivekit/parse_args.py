@@ -372,6 +372,30 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--sat-soft-max-tokens",
+        type=int,
+        default=40,
+        dest="sat_soft_max_tokens",
+        help=(
+            "Soft length limit for SaT sentence detection: when the pending "
+            "sentence exceeds this many tokens, split at the best point found "
+            "by SaT if its probability is high enough."
+        ),
+    )
+
+    parser.add_argument(
+        "--sat-max-tokens",
+        type=int,
+        default=60,
+        dest="sat_max_tokens",
+        help=(
+            "Hard length limit for SaT sentence detection: when the pending "
+            "sentence exceeds this many tokens, split unconditionally at the "
+            "best point found by SaT (character midpoint as last resort)."
+        ),
+    )
+
+    parser.add_argument(
         "--sentence-detection",
         action="store_true",
         default=False,
