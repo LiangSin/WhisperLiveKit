@@ -945,7 +945,7 @@ class AudioProcessor:
                     logger.info("Results formatter: All upstream processors are done and in stopping state. Terminating.")
                     return
                 
-                await asyncio.sleep(0.2)
+                await asyncio.sleep(0.5)
                 
             except Exception as e:
                 logger.warning(f"Exception in results_formatter. Traceback: {traceback.format_exc()}")
