@@ -293,8 +293,9 @@ class AudioProcessor:
                     sentinel=SENTINEL,
                     translation_sentence_queue=self.translation_queue,
                     hallucination_reset=HALLUCINATION_RESET,
-                    translate_pending=getattr(
-                        self.args, "translate_pending", False
+                    translate_pending=(
+                        getattr(self.args, "translate_pending", False)
+                        and getattr(self.args, "send_pending", True)
                     ),
                     pending_translation_interval=getattr(
                         self.args, "pending_translation_interval", 1.5
@@ -882,11 +883,27 @@ class AudioProcessor:
                 async with self.lock:
                     tokens_snapshot = list(self.state.tokens)
 
+                # Snapshotted before formatting and reused by the termination
+                # check below, so the last iteration always formats with
+                # final_flush=True and withheld lines are released before exit.
+                final_flush = self.is_stopping and self._processing_tasks_done()
+
                 if self.sentence_detector:
                     from whisperlivekit.sentence_detector import format_sentence_lines
+                    # With send_pending off, a finalized sentence is sent only
+                    # once its translation has arrived, so caption and
+                    # translation appear together. On the final iteration
+                    # (stream over, all processors done) everything is
+                    # released even if a translation never arrived.
+                    withhold_untranslated = (
+                        not getattr(self.args, "send_pending", True)
+                        and self.use_offline_translation
+                        and not final_flush
+                    )
                     lines, undiarized_text = await asyncio.to_thread(
                         format_sentence_lines, state, self.args,
                         tokens=tokens_snapshot,
+                        withhold_untranslated=withhold_untranslated,
                     )
                 else:
                     lines, undiarized_text = await asyncio.to_thread(
@@ -926,12 +943,16 @@ class AudioProcessor:
                         end=state.end_buffer
                     )]
                 
+                # send_pending=False means clients only get finalized content:
+                # the unvalidated ASR/translation buffers stay server-side.
+                # Status and push decisions above still use the real buffers.
+                send_pending = getattr(self.args, "send_pending", True)
                 response = FrontData(
                     status=response_status,
                     lines=lines,
-                    buffer_transcription=buffer_transcription.text.strip(),
+                    buffer_transcription=buffer_transcription.text.strip() if send_pending else '',
                     buffer_diarization=buffer_diarization,
-                    buffer_translation=buffer_translation_text,
+                    buffer_translation=buffer_translation_text if send_pending else '',
                     remaining_time_transcription=state.remaining_time_transcription,
                     remaining_time_diarization=state.remaining_time_diarization if self.args.diarization else 0
                 )
@@ -945,7 +966,7 @@ class AudioProcessor:
                 if self.archive_writer:
                     self.archive_writer.flush_subtitles_if_due()
                 
-                if self.is_stopping and self._processing_tasks_done():
+                if final_flush:
                     logger.info("Results formatter: All upstream processors are done and in stopping state. Terminating.")
                     return
                 

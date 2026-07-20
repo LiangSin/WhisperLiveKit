@@ -357,7 +357,7 @@ class SentenceDetectionProcessor:
 # Output formatter for sentence-detection mode
 # ---------------------------------------------------------------------------
 
-def format_sentence_lines(state, args, tokens=None):
+def format_sentence_lines(state, args, tokens=None, withhold_untranslated=False):
     """
     Build `~whisperlivekit.timed_objects.Line` objects from SaT-detected
     sentences instead of raw ASR tokens.
@@ -372,9 +372,13 @@ def format_sentence_lines(state, args, tokens=None):
     tokens:
         Optional pre-snapshotted token list. When *None*, ``state.tokens``
         is used directly.
+    withhold_untranslated:
+        Hold back the trailing lines whose translation has not arrived yet,
+        so caption and translation reach the client together.
     """
+    send_pending = getattr(args, "send_pending", True)
     sentences = list(state.sentence_segments)
-    pending = getattr(state, "sentence_pending", None)
+    pending = getattr(state, "sentence_pending", None) if send_pending else None
     if pending:
         sentences = sentences + [pending]
     if not sentences:
@@ -435,7 +439,7 @@ def format_sentence_lines(state, args, tokens=None):
     # on screen until the validated translation replaces it — instead of the
     # translation blinking out. A stale snapshot from an older generation
     # matches no line and is dropped.
-    translation_pending = getattr(state, "translation_pending", None)
+    translation_pending = getattr(state, "translation_pending", None) if send_pending else None
     if translation_pending and (translation_pending.text or "").strip():
         for line in reversed(lines):
             if line.start == translation_pending.start:
@@ -445,6 +449,15 @@ def format_sentence_lines(state, args, tokens=None):
                 break
             if line.start < translation_pending.start:
                 break
+
+    # Only the trailing untranslated run is withheld: an untranslated line
+    # that is followed by a translated one lost its translation to an error
+    # and will never get it, so holding it back would stall the stream.
+    if withhold_untranslated:
+        keep = len(lines)
+        while keep and not (lines[keep - 1].translation or "").strip():
+            keep -= 1
+        lines = lines[:keep]
 
     # if lines and translation_segs:
     #     latest_transcription_end = lines[-1].end

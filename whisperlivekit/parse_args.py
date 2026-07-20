@@ -345,6 +345,24 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--no-send-pending",
+        action="store_false",
+        default=True,
+        dest="send_pending",
+        help=(
+            "Do not send provisional content to clients: the still-open "
+            "(pending) sentence is dropped from the output lines and the "
+            "unvalidated transcription/translation buffers are sent empty, so "
+            "clients only ever see SaT-completed sentences. When offline "
+            "translation is enabled, each finalized sentence is additionally "
+            "held back until its translation has arrived, so caption and "
+            "translation appear together. Also forces pending translation "
+            "off (--translate-pending is ignored). By default pending "
+            "content is sent."
+        ),
+    )
+
+    parser.add_argument(
         "--translate-pending",
         action="store_true",
         default=False,

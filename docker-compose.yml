@@ -52,6 +52,7 @@ services:
       --translation-model ${WLK_TRANSLATION_MODEL:-translategemma}
       --translation-model-size ${WLK_TRANSLATION_MODEL_SIZE:-4b}
       --translategemma-url ${WLK_TRANSLATEGEMMA_URL:-https://translategemma:8000/v1}
+      ${WLK_NO_SEND_PENDING_FLAG:-}
       ${WLK_TRANSLATE_PENDING_FLAG:-}
       --pending-translation-interval ${WLK_PENDING_TRANSLATION_INTERVAL:-1.5}
       --sat-soft-max-tokens ${WLK_SAT_SOFT_MAX_TOKENS:-40}

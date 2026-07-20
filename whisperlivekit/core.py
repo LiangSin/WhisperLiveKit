@@ -62,6 +62,7 @@ class TranscriptionEngine:
             "backend": "auto",
             "translation_model": "nllw",
             "translategemma_url": None,
+            "send_pending": True,
             "translate_pending": False,
             "pending_translation_interval": 1.5,
             "sentence_detection": False,
