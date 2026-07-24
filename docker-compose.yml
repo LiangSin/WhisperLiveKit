@@ -55,6 +55,7 @@ services:
       ${WLK_NO_SEND_PENDING_FLAG:-}
       ${WLK_TRANSLATE_PENDING_FLAG:-}
       --pending-translation-interval ${WLK_PENDING_TRANSLATION_INTERVAL:-1.5}
+      --silence-commit-timeout ${WLK_SILENCE_COMMIT_TIMEOUT:-2}
       --sat-soft-max-tokens ${WLK_SAT_SOFT_MAX_TOKENS:-40}
       --sat-max-tokens ${WLK_SAT_MAX_TOKENS:-60}
       ${WLK_TARGET_LANGUAGE_ARG:-}

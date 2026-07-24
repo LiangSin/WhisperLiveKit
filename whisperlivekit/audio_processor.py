@@ -300,6 +300,9 @@ class AudioProcessor:
                     pending_translation_interval=getattr(
                         self.args, "pending_translation_interval", 1.5
                     ),
+                    silence_commit_timeout=getattr(
+                        self.args, "silence_commit_timeout", 2.0
+                    ),
                 )
             else:
                 self._sentence_proc = SentenceDetectionProcessor(
@@ -309,6 +312,9 @@ class AudioProcessor:
                     lock=self.lock,
                     sentinel=SENTINEL,
                     hallucination_reset=HALLUCINATION_RESET,
+                    silence_commit_timeout=getattr(
+                        self.args, "silence_commit_timeout", 2.0
+                    ),
                 )
         else:
             self._sentence_proc = None

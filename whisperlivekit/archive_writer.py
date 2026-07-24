@@ -191,8 +191,13 @@ class ConnectionArchiveWriter:
             return
 
         stable_lines = materialized[:-1] if len(materialized) > 1 else []
+        # The last line may still grow; keep it as pending so close() can
+        # write the final version if no later ingest supersedes it.
         self._pending_transcript = self._line_tuple(materialized[-1])
-        self._pending_translation = self._translation_tuple(materialized[-1])
+        self._pending_translation = (
+            None if getattr(materialized[-1], "translation_provisional", False)
+            else self._translation_tuple(materialized[-1])
+        )
 
         for line in stable_lines:
             start, end, text = self._line_tuple(line)
@@ -215,6 +220,14 @@ class ConnectionArchiveWriter:
         self._last_subtitle_flush_at = now
 
     async def close(self) -> None:
+        # The last ingested line was held back as pending (it may still have
+        # been growing); the stream is over now, so it is final — write it.
+        if self._pending_transcript:
+            self._write_transcript_cue(*self._pending_transcript)
+            self._pending_transcript = None
+        if self._pending_translation:
+            self._write_translation_cue(*self._pending_translation)
+            self._pending_translation = None
         self.flush_subtitles_if_due(force=True)
         if self._transcript_fp:
             self._transcript_fp.close()

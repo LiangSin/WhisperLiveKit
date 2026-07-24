@@ -209,6 +209,11 @@ class SentenceDetectionProcessor:
     pending_translation_interval:
         Seconds between provisional translations of the pending sentence.
         Only effective when ``translate_pending`` is True.
+    silence_commit_timeout:
+        Seconds of silence after which the pending sentence is force-committed
+        as a completed sentence (SaT is not called during silence, so without
+        this the last pending caption would stay stuck until speech resumes).
+        <= 0 disables the forced commit.
     """
 
     def __init__(
@@ -222,6 +227,7 @@ class SentenceDetectionProcessor:
         hallucination_reset: Optional[object] = None,
         translate_pending: bool = False,
         pending_translation_interval: float = 1.5,
+        silence_commit_timeout: float = 2.0,
     ):
         self.detector = detector
         self.sat_queue = sat_queue
@@ -232,6 +238,7 @@ class SentenceDetectionProcessor:
         self.hallucination_reset = hallucination_reset
         self.translate_pending = translate_pending
         self.pending_translation_interval = pending_translation_interval
+        self.silence_commit_timeout = silence_commit_timeout
         self._silence_started_at: Optional[float] = None
         self._silence_flushed = False
         self._pending_translation_task: Optional[asyncio.Task] = None
@@ -290,7 +297,31 @@ class SentenceDetectionProcessor:
     async def _run_loop(self):
         while True:
             try:
-                item = await self.sat_queue.get()
+                # Once the silence outlasts silence_commit_timeout, the
+                # pending sentence is flushed as completed.
+                timeout = None
+                if (
+                    self._silence_started_at is not None
+                    and not self._silence_flushed
+                    and self.silence_commit_timeout > 0
+                ):
+                    timeout = max(
+                        0.0,
+                        self.silence_commit_timeout
+                        - (monotonic() - self._silence_started_at),
+                    )
+                if timeout is not None:
+                    try:
+                        item = await asyncio.wait_for(self.sat_queue.get(), timeout=timeout)
+                    except asyncio.TimeoutError:
+                        logger.info(
+                            "Silence exceeded %.1fs: force-committing pending sentence.",
+                            self.silence_commit_timeout,
+                        )
+                        await self._flush_pending_sentence()
+                        continue
+                else:
+                    item = await self.sat_queue.get()
 
                 if item is self.sentinel:
                     logger.debug("SentenceDetectionProcessor: sentinel received, flushing.")
@@ -315,22 +346,34 @@ class SentenceDetectionProcessor:
 
                 elif isinstance(item, Silence):
                     if item.has_ended:
-                        if item.duration and item.duration > 5:
-                            # Prolonged silence is a reliable sentence boundary.
+                        # Audio-time check: catches silences that outlast the
+                        # threshold in stream time but not in wall-clock time
+                        # (e.g. faster-than-realtime replay).
+                        if (
+                            not self._silence_flushed
+                            and self.silence_commit_timeout > 0
+                            and item.duration
+                            and item.duration > self.silence_commit_timeout
+                        ):
                             await self._flush_pending_sentence()
                         self._silence_started_at = None
                         self._silence_flushed = False
-                    else:
-                        if self._silence_started_at is None:
-                            self._silence_started_at = monotonic()
-                        elif not self._silence_flushed and (monotonic() - self._silence_started_at) > 5:
-                            await self._flush_pending_sentence()
+                    elif self._silence_started_at is None:
+                        # Wall-clock flush during the silence is handled by
+                        # the timeout on the queue wait above.
+                        self._silence_started_at = monotonic()
                     self.sat_queue.task_done()
 
                 elif isinstance(item, list):
-                    # Any token batch means silence has ended/resumed speech.
-                    self._silence_started_at = None
-                    self._silence_flushed = False
+                    if self._silence_started_at is not None:
+                        # Tokens decoded from pre-silence audio arrive after
+                        # the silence start event (the ASR force-finalize is
+                        # asynchronous). The silence itself is still ongoing —
+                        # a genuine speech resume is always preceded by the
+                        # silence end event, which clears this tracking — so
+                        # re-arm the commit timer instead of cancelling it.
+                        self._silence_started_at = monotonic()
+                        self._silence_flushed = False
                     sentences = await asyncio.to_thread(self.detector.push, item)
                     # Only store completed sentences; propagate pending for live display.
                     async with self.lock:

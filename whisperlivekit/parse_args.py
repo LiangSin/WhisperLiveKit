@@ -390,6 +390,19 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--silence-commit-timeout",
+        type=float,
+        default=2.0,
+        dest="silence_commit_timeout",
+        help=(
+            "Seconds of silence after which the still-open (pending) sentence "
+            "is force-committed as a completed sentence. SaT is not called "
+            "during silence, so without this the last pending caption would "
+            "stay stuck until speech resumes. Set to 0 to disable."
+        ),
+    )
+
+    parser.add_argument(
         "--sat-soft-max-tokens",
         type=int,
         default=40,
