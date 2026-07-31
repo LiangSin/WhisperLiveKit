@@ -489,6 +489,9 @@ def format_sentence_lines(state, args, tokens=None, withhold_untranslated=False)
                 if not line.translation:
                     line.translation = translation_pending.text
                     line.translation_provisional = True
+                    line.translation_stable_chars = getattr(
+                        translation_pending, "stable_chars", 0
+                    )
                 break
             if line.start < translation_pending.start:
                 break

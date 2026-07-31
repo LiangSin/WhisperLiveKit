@@ -92,7 +92,9 @@ class SpeakerSegment(TimedText):
 
 @dataclass
 class Translation(TimedText):
-    pass
+    # For a provisional (pending) translation: how many leading characters of
+    # `text` are frozen by local agreement and will never be rewritten.
+    stable_chars: int = 0
 
     def approximate_cut_at(self, cut_time):
         """
@@ -145,9 +147,15 @@ class Silence():
 class Line(TimedText):
     translation: str = ''
     # True while `translation` is a provisional (pending) translation that a
-    # validated one will replace; display-only, never archived, not on the wire.
+    # validated one will replace. Never archived; goes on the wire together
+    # with `translation_stable_chars` so frontends can render the frozen head
+    # normally and the tentative tail in a lighter style.
     translation_provisional: bool = False
-    
+    # Leading characters of `translation` frozen by local agreement. Only
+    # meaningful while translation_provisional is True; a validated
+    # translation is fully stable and sends neither field.
+    translation_stable_chars: int = 0
+
     def to_dict(self):
         _dict = {
             'speaker': int(self.speaker) if self.speaker != -1 else 1,
@@ -157,6 +165,11 @@ class Line(TimedText):
         }
         if self.translation:
             _dict['translation'] = self.translation
+            if self.translation_provisional:
+                _dict['translation_provisional'] = True
+                _dict['translation_stable_chars'] = max(
+                    0, min(self.translation_stable_chars, len(self.translation))
+                )
         if self.detected_language:
             _dict['detected_language'] = self.detected_language
         return _dict

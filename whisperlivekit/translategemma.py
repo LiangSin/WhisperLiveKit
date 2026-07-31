@@ -268,11 +268,18 @@ class GemmaTranslationProcessor:
         self._pending_gen_start: Optional[float] = None
         self._stable_prefix: str = ""
         self._prev_tail: str = ""
+        # (source_text, display_translation) per tick of this generation.
+        # When SaT later cuts the pending text into a finalized sentence, the
+        # latest snapshot whose source is a prefix of that sentence gives us a
+        # translation covering only its content — a free source/target
+        # alignment for the commit-time forced prefix (_commit_prefix).
+        self._history: List[tuple] = []
 
     def _reset_pending_generation(self, gen_start: Optional[float]) -> None:
         self._pending_gen_start = gen_start
         self._stable_prefix = ""
         self._prev_tail = ""
+        self._history = []
 
     async def _translate_pending(self, pending_sentence) -> str:
         """Re-translate the pending sentence with a frozen stable prefix.
@@ -294,7 +301,36 @@ class GemmaTranslationProcessor:
             self._stable_prefix += continuation[:cut]
             continuation = continuation[cut:]
         self._prev_tail = continuation
-        return (self._stable_prefix + continuation).strip()
+        display = (self._stable_prefix + continuation).strip()
+        self._history.append(((pending_sentence.text or "").strip(), display))
+        if len(self._history) > 64:
+            self._history = self._history[-64:]
+        return display
+
+    def _commit_prefix(self, sentence_text: str) -> tuple:
+        """Forced decoder prefix for a sentence just cut out of the pending text.
+
+        The pending snapshots grew monotonically, so the latest snapshot whose
+        source is a prefix of the finalized sentence yields a translation that
+        covers only this sentence's content. Its overlap with the frozen
+        stable prefix (cut at a safe boundary) is text that was both displayed
+        as frozen and belongs to this sentence — forcing it keeps the
+        validated translation identical to what the viewer already read.
+
+        Returns ``(prefix, snapshot_translation)``; the snapshot lets the
+        caller clamp the on-screen provisional to this sentence's content.
+        """
+        target = (sentence_text or "").strip()
+        if not target or not self._stable_prefix:
+            return "", ""
+        best = ""
+        for src, translation in self._history:
+            if src and target.startswith(src):
+                best = translation
+        if not best:
+            return "", ""
+        cut = promotable_prefix_length(self._stable_prefix, best)
+        return best[:cut], best
 
     async def run(self):
         """Main processing loop — run as an asyncio.Task."""
@@ -340,21 +376,47 @@ class GemmaTranslationProcessor:
                         pending_sentence = None
 
                 if sentences or pending_sentence:
-                    tasks = [self.client.translate(s.text) for s in sentences]
+                    tasks = []
+                    commit_prefixes = []
+                    for s in sentences:
+                        prefix = ""
+                        if s.start == self._pending_gen_start:
+                            # This sentence was cut out of the pending text we
+                            # have been provisionally translating: force the
+                            # already-displayed frozen prefix so the validated
+                            # translation does not jump. The remainder starts
+                            # a fresh generation.
+                            prefix, snapshot = self._commit_prefix(s.text)
+                            self._reset_pending_generation(None)
+                            if snapshot:
+                                # While the validated translation is in flight,
+                                # the carried-over provisional still displays
+                                # the whole old pending — including content of
+                                # the *next* sentence. Clamp it to this
+                                # sentence's snapshot so the frozen region only
+                                # ever extends, never shrinks, at commit.
+                                async with self.lock:
+                                    tp = self.state.translation_pending
+                                    if tp is not None and tp.start == s.start:
+                                        tp.text = snapshot
+                                        tp.stable_chars = min(len(prefix), len(snapshot))
+                        commit_prefixes.append(prefix)
+                        tasks.append(self.client.translate(s.text, prefix=prefix or None))
                     if pending_sentence:
                         tasks.append(self._translate_pending(pending_sentence))
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
                     translations = []
-                    for s, r in zip(sentences, results[:len(sentences)]):
+                    for s, prefix, r in zip(sentences, commit_prefixes, results[:len(sentences)]):
                         if isinstance(r, BaseException):
                             logger.warning(
                                 "Gemma translation error for sentence %r: %s",
                                 s.text[:60], r,
                             )
                             continue
+                        text = (prefix + r).strip() if prefix else r.strip()
                         translations.append(
-                            Translation(start=s.start, end=s.end, text=r.strip())
+                            Translation(start=s.start, end=s.end, text=text)
                         )
 
                     pending_translation = None
@@ -369,6 +431,7 @@ class GemmaTranslationProcessor:
                                 start=pending_sentence.start,
                                 end=pending_sentence.end,
                                 text=r,
+                                stable_chars=min(len(self._stable_prefix), len(r)),
                             )
 
                     async with self.lock:
