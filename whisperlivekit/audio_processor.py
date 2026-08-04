@@ -155,6 +155,10 @@ class AudioProcessor:
         # Stateful rolling-hash detector for triple-repetition patterns.
         # Fed only with new_text each call (O(|new_text|) vs O(window)).
         self._repeat_detector = LoopingDetector()
+        # Last point we salvaged audio from after a BoH/loop reset. If the
+        # decoder loops again without having advanced past it, the audio
+        # itself is the trigger — skip it instead of re-decoding forever.
+        self._boh_last_resume = float("-inf")
         logger.info(
             "[BoH] Hallucination filter: %s.",
             f"active with {len(self.boh_phrases)} phrase(s), window={self._boh_window_size} chars"
@@ -603,7 +607,29 @@ class AudioProcessor:
                                 matched_phrase,
                                 check_text[:120],
                             )
-                            self.transcription.force_refresh(current_time_offset=self.state.end_buffer)
+                            resume_from = next(
+                                (t.end for t in reversed(self.state.tokens) if t.end is not None),
+                                0.0,
+                            )
+                            if resume_from <= self._boh_last_resume + 1.0:
+                                # Second trigger without progress: the audio
+                                # itself induces the loop — skip it (old behavior).
+                                self.transcription.force_refresh(current_time_offset=self.state.end_buffer)
+                                logger.warning(
+                                    "[BoH] repeat trigger without progress at t=%.2fs — skipping audio (stop-loss).",
+                                    resume_from,
+                                )
+                            else:
+                                salvaged = self.transcription.force_refresh(
+                                    current_time_offset=self.state.end_buffer,
+                                    resume_from=resume_from,
+                                )
+                                self._boh_last_resume = resume_from
+                                logger.warning(
+                                    "[BoH] re-queued %.2fs of audio from t=%.2fs for clean re-decode.",
+                                    salvaged,
+                                    resume_from,
+                                )
                             self._boh_recent_text = ""
                             self._repeat_detector.reset()
                             logger.warning(

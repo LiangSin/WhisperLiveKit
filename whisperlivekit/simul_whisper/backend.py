@@ -174,21 +174,56 @@ class SimulStreamingOnlineProcessor:
         except Exception as e:
             logger.exception(f"SimulStreaming warmup failed: {e}")
 
-    def force_refresh(self, current_time_offset=None):
-        """Discard all pending state and force a complete context reset.
+    # Re-inserted salvage audio is split into pieces this long so that
+    # insert_audio()'s audio_max_len trimming (which drops whole segments)
+    # keeps working at its usual granularity.
+    _SALVAGE_CHUNK_S = 5.0
 
-        Called when a hallucination phrase is detected in the model output.
-        Clears the KV cache and all buffered segments so that the next
-        inference starts from a clean slate.
+    def force_refresh(self, current_time_offset=None, resume_from=None):
+        """Discard decoder state and force a complete context reset.
 
-        When `current_time_offset` is provided, global_time_offset is
-        updated so that new tokens continue with monotonically increasing
-        timestamps instead of colliding with earlier sentences.
+        Called when a hallucination phrase / repetition loop is detected in
+        the model output. Clears context and all buffered segments so that
+        the next inference starts from a clean slate.
+
+        resume_from: absolute time (s) of the last word already delivered
+        downstream. When given, buffered audio after this point is NOT
+        discarded — it is re-inserted so the next inference re-decodes it
+        with the clean context, instead of being skipped forever. Returns
+        the number of seconds salvaged (0.0 when skipping).
+
+        When `current_time_offset` is provided (and no audio is salvaged),
+        global_time_offset jumps there so new tokens continue with
+        monotonically increasing timestamps.
         """
-        if self.model is not None:
-            self.model.refresh_segment(complete=True)
-            if current_time_offset is not None:
-                self.model.global_time_offset = current_time_offset
+        if self.model is None:
+            return 0.0
+
+        salvage = None
+        salvage_start = None
+        if resume_from is not None and self.model.state.segments:
+            buffer_start = self.model.global_time_offset + self.model.state.cumulative_time_offset
+            buffer_end = buffer_start + self.model.segments_len()
+            # 0.2s pre-roll: word end timestamps are approximate, don't clip
+            # the first un-emitted word.
+            salvage_start = max(resume_from - 0.2, buffer_start)
+            if buffer_end - salvage_start > 0.1:
+                audio = torch.cat(self.model.state.segments, dim=0)
+                skip_samples = int((salvage_start - buffer_start) * 16000)
+                salvage = audio[skip_samples:]
+
+        self.model.refresh_segment(complete=True)
+
+        if salvage is not None:
+            self.model.global_time_offset = salvage_start
+            chunk = int(self._SALVAGE_CHUNK_S * 16000)
+            for i in range(0, salvage.shape[0], chunk):
+                self.model.insert_audio(salvage[i:i + chunk])
+            return salvage.shape[0] / 16000
+
+        if current_time_offset is not None:
+            self.model.global_time_offset = current_time_offset
+        return 0.0
 
     def close(self):
         """Release this session's decoder state.
