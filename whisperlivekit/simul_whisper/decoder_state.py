@@ -30,6 +30,12 @@ class DecoderState:
     cumulative_time_offset: float = 0.0
     first_timestamp: Optional[float] = None
     last_attend_frame: int = 0
+
+    # Rewind-storm detection: absolute times (s) of recent rewind-guard hits.
+    # Three hits within a 1s spread mean the decoder is stuck re-failing on
+    # the same audio; rewind_storm signals the caller to refresh the context.
+    recent_rewinds: List[float] = field(default_factory=list)
+    rewind_storm: bool = False
     
     speaker: int = -1
     log_segments: int = 0
@@ -63,6 +69,8 @@ class DecoderState:
         self.last_attend_frame = -rewind_threshold
         self.cumulative_time_offset = 0.0
         self.pending_incomplete_tokens = []
+        self.recent_rewinds = []
+        self.rewind_storm = False
         self.log_segments += 1
     
     def full_reset(self, rewind_threshold: int = 200):

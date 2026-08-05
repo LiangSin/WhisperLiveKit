@@ -645,6 +645,37 @@ class AudioProcessor:
                                 await self.sat_queue.put(HALLUCINATION_RESET)
                             break
 
+                # Rewind-storm recovery: the decoder flags deterministic
+                # re-failure on the same audio (repeated same-position rewinds).
+                # Same medicine as a BoH hit — clean context + salvage the
+                # un-delivered audio — with the same stop-loss.
+                _decoder_state = getattr(getattr(self.transcription, "model", None), "state", None)
+                if _decoder_state is not None and getattr(_decoder_state, "rewind_storm", False):
+                    _decoder_state.rewind_storm = False
+                    resume_from = next(
+                        (t.end for t in reversed(new_tokens) if t.end is not None), None)
+                    if resume_from is None:
+                        resume_from = next(
+                            (t.end for t in reversed(self.state.tokens) if t.end is not None), 0.0)
+                    if resume_from <= self._boh_last_resume + 1.0:
+                        self.transcription.force_refresh(current_time_offset=self.state.end_buffer)
+                        logger.warning(
+                            "[rewind storm] repeat trigger without progress at t=%.2fs — skipping audio (stop-loss).",
+                            resume_from,
+                        )
+                    else:
+                        salvaged = self.transcription.force_refresh(
+                            current_time_offset=self.state.end_buffer,
+                            resume_from=resume_from,
+                        )
+                        self._boh_last_resume = resume_from
+                        logger.warning(
+                            "[rewind storm] context refreshed; re-queued %.2fs of audio from t=%.2fs.",
+                            salvaged,
+                            resume_from,
+                        )
+                    current_audio_processed_upto = self.state.end_buffer
+
                 if new_tokens:
                     validated_text = self.sep.join([t.text for t in new_tokens])
                     if buffer_text.startswith(validated_text):

@@ -26,6 +26,10 @@ from .eow_detection import fire_at_boundary, load_cif
 from .token_buffer import TokenBuffer
 
 DEC_PAD = 50257
+# Attention advancing more than this many frames (0.02s each) within a single
+# decode step usually means the decoder skipped audio (e.g. anchored onto a
+# later repetition of a phrase). Log-only guard for now.
+FORWARD_JUMP_WARN_FRAMES = 150
 logger = logging.getLogger(__name__)
 
 if mlx_backend_available():
@@ -278,6 +282,8 @@ class AlignAtt:
             self.state.segments = []
         self.state.log_segments += 1
         self.state.pending_incomplete_tokens = []
+        self.state.recent_rewinds = []
+        self.state.rewind_storm = False
 
     def fire_at_boundary(self, chunked_encoder_feature: torch.Tensor):
         if self.state.always_fire: 
@@ -548,13 +554,39 @@ class AlignAtt:
                     logger.debug("omit rewinding from special tokens")
                     self.state.last_attend_frame = most_attended_frame
                 else:
-                    logger.debug(
+                    recent_text = self.tokenizer.decode(
+                        [t for t in current_tokens[0, -12:].tolist() if t < DEC_PAD])
+                    logger.warning(
                         f"[rewind detected] current attention pos: {most_attended_frame}, "
-                        f"last attention pos: {self.state.last_attend_frame}; omit this segment")
+                        f"last attention pos: {self.state.last_attend_frame}; omit this segment "
+                        f"| recent text: {recent_text!r}")
+                    # Storm detection: repeated rewinds landing at the same
+                    # absolute time mean deterministic re-failure on the same
+                    # audio — retrying with unchanged context cannot succeed.
+                    rewind_abs = (most_attended_frame * 0.02
+                                  + self.state.cumulative_time_offset
+                                  + self.state.global_time_offset)
+                    self.state.recent_rewinds = (self.state.recent_rewinds + [rewind_abs])[-3:]
+                    if (len(self.state.recent_rewinds) == 3
+                            and max(self.state.recent_rewinds) - min(self.state.recent_rewinds) <= 1.0):
+                        self.state.rewind_storm = True
+                        self.state.recent_rewinds = []
+                        logger.warning(
+                            f"[rewind storm] 3 consecutive rewinds near t={rewind_abs:.2f}s "
+                            f"— requesting context refresh")
                     self.state.last_attend_frame = -self.cfg.rewind_threshold
                     current_tokens = torch.cat(self.state.tokens, dim=1) if len(self.state.tokens) > 0 else self.state.tokens[0]
                     break
             else:
+                if (not is_last and self.state.last_attend_frame >= 0
+                        and most_attended_frame - self.state.last_attend_frame > FORWARD_JUMP_WARN_FRAMES):
+                    recent_text = self.tokenizer.decode(
+                        [t for t in current_tokens[0, -12:].tolist() if t < DEC_PAD])
+                    logger.warning(
+                        f"[forward jump] attention moved {most_attended_frame - self.state.last_attend_frame} "
+                        f"frames ({(most_attended_frame - self.state.last_attend_frame) * 0.02:.1f}s) in one step: "
+                        f"{self.state.last_attend_frame} -> {most_attended_frame} "
+                        f"| recent text: {recent_text!r}")
                 self.state.last_attend_frame = most_attended_frame
 
             if content_mel_len - most_attended_frame <= (4 if is_last else self.cfg.frame_threshold):
