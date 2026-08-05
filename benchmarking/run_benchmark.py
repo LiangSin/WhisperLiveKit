@@ -54,7 +54,34 @@ def merge_with_overlap(acc, new, probe_len=100, volatile=300):
     return acc + " " + new
 
 
-async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False, speed=0.0, accumulate_mode="lines"):
+def _is_prompt_entry(entry):
+    return isinstance(entry, dict) and ("init_prompt" in entry or "static_init_prompt" in entry)
+
+
+def lookup_prompts(keywords, chapter_samples):
+    """Find the prompt entry matching the chapter's audio file.
+
+    Two layouts are supported:
+    - flat:   {"<group>": {init_prompt, static_init_prompt}} where <group> is a
+      dataset directory name (playlist id or 'SPEECH') appearing in the audio path
+    - nested: {"<group>": {"<video_id>": {init_prompt, ...}}} where <video_id>
+      is the audio file's basename without extension
+    """
+    if not keywords or not chapter_samples:
+        return None, None
+    path = os.path.normpath(chapter_samples[0]["audio_path"])
+    parts = path.split(os.sep)
+    stem = os.path.splitext(os.path.basename(path))[0]
+    for key, entry in keywords.items():
+        if key in parts or key == stem:
+            if _is_prompt_entry(entry):
+                return key, entry
+            if isinstance(entry, dict) and _is_prompt_entry(entry.get(stem)):
+                return f"{key}/{stem}", entry[stem]
+    return None, None
+
+
+async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_file, debug=False, translate=False, speed=0.0, accumulate_mode="lines", keywords_json=None):
     print(f"Loading dataset from {dataset_path} using class {dataset_class_name}...")
     
     try:
@@ -65,6 +92,12 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
         
     dataset_instance = DSClass(dataset_path, translate=translate)
     print(f"Found {len(dataset_instance)} samples.")
+
+    keywords = None
+    if keywords_json:
+        with open(keywords_json, encoding="utf-8") as f:
+            keywords = json.load(f)
+        print(f"Loaded session prompts for {len(keywords)} group(s) from {keywords_json}")
     
     if len(dataset_instance) == 0:
         print("No samples found. Check the dataset path.")
@@ -118,7 +151,25 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     print(f"[DEBUG] Connected to {websocket_url}, config: {config}")
                     
                 use_audio_worklet = config.get("useAudioWorklet", False)
-                
+
+                # Send per-session prompts (see docs/session_config.md): the config
+                # message must precede the first audio frame, and the server replies
+                # with config_ack/config_error before any transcription messages.
+                prompt_key, prompts = lookup_prompts(keywords, chapter_samples)
+                if prompts:
+                    session_config = {"type": "config"}
+                    for field in ("init_prompt", "static_init_prompt"):
+                        if prompts.get(field) is not None:
+                            session_config[field] = prompts[field]
+                    await websocket.send(json.dumps(session_config, ensure_ascii=False))
+                    ack = json.loads(await websocket.recv())
+                    if ack.get("type") == "config_ack":
+                        print(f"[{group_id}] session config applied (group '{prompt_key}'): {list(ack.get('applied', {}))}")
+                    else:
+                        print(f"[{group_id}] WARNING: session config rejected: {ack}")
+                elif keywords is not None:
+                    print(f"[{group_id}] WARNING: no prompt entry in keywords json matches this chapter; running without session config")
+
                 # Generate dummy WAV header for 16kHz mono s16le if needed
                 if not use_audio_worklet:
                     # minimal WAV header with 0 length (some players might dislike it, but ffmpeg usually handles it)
@@ -355,8 +406,9 @@ if __name__ == "__main__":
     parser.add_argument("--translate", action="store_true", help="Collect translation output from the server and save to a separate file")
     parser.add_argument("--speed", type=float, default=0.0, help="Audio streaming speed factor: 0 = send as fast as possible (default), 1.0 = real-time (matches production)")
     parser.add_argument("--accumulate-mode", choices=["lines", "merge"], default="lines", dest="accumulate_mode", help="How to build the hypothesis: 'lines' (this repo's stable sentence lines) or 'merge' (overlap-merge full snapshots; for upstream main whose lines grow in place and get pruned)")
+    parser.add_argument("--keywords-json", default=None, dest="keywords_json", help="Path to a JSON file mapping dataset directory names to session prompts ({'<group>': {'init_prompt': ..., 'static_init_prompt': ...}}); when given, matching prompts are sent as a per-connection session config (docs/session_config.md)")
     args = parser.parse_args()
 
     # Python 3.6 compatibility
     loop = asyncio.get_event_loop()
-    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate, speed=args.speed, accumulate_mode=args.accumulate_mode))
+    loop.run_until_complete(run_benchmark(args.dataset_path, args.dataset_class, args.url, args.output, debug=args.debug, translate=args.translate, speed=args.speed, accumulate_mode=args.accumulate_mode, keywords_json=args.keywords_json))
