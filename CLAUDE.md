@@ -17,6 +17,7 @@ docker compose up --build whisperlivekit
 ### Benchmarking (requires a running server)
 
 ```bash
+conda activate whisperlive
 scripts/start_benchmark.sh --youtube-debug          # presets: --{libri,youtube,translate}[-debug]
 python benchmarking/calculate_overall_metrics.py benchmarking/results/<file>.json   # WER
 python benchmarking/calculate_translate_metrics.py -hyp ... -ref ... --metrics chrf # chrF++/COMET

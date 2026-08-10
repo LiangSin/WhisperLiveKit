@@ -32,6 +32,7 @@ def parse_end(value, default=0.0) -> float:
 # Ensure we can import dataset
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import DatasetClass
+import segment_align
 
 
 def merge_with_overlap(acc, new, probe_len=100, volatile=300):
@@ -116,9 +117,17 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
         translate_answer_file = os.path.join(translate_dir, output_stem + ".answer.txt")
         translate_out = open(translate_file, "w", encoding="utf-8")
         translate_answer_out = open(translate_answer_file, "w", encoding="utf-8")
+        # Segment-level (time-windowed) aligned files to adapt to COMET's 512-token window
+        seg_files = {
+            kind: open(os.path.join(translate_dir, f"{output_stem}.seg.{kind}.txt"),
+                       "w", encoding="utf-8")
+            for kind in ("src", "hyp", "ref")
+        }
+        seg_window_count = 0
     else:
         translate_out = None
         translate_answer_out = None
+        seg_files = None
     
     print(f"Starting benchmark against {websocket_url}...")
     
@@ -193,6 +202,7 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                 accumulated_translation = ""    # committed translations concatenated so far
                 accumulated_translation_end = 0.0  # end timestamp of last committed translation line
                 pending_translation = ""        # translation of the current pending sentence
+                translation_by_start = {}       # start_sec -> latest committed translation
 
                 merged_text = ""
 
@@ -238,6 +248,16 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                                 break
                             accumulated_translation = (accumulated_translation + " " + trans).strip()
                             accumulated_translation_end = line_end
+
+                        # Segment collection is independent of the monotonic
+                        # accumulator above: rewind-salvaged lines commit with
+                        # out-of-order timestamps and would be dropped by the
+                        # end-time filter, but for time-windowed scoring every
+                        # committed line counts (latest version wins per start).
+                        for l in committed_lines:
+                            trans = (l.get("translation") or "").strip()
+                            if trans:
+                                translation_by_start[parse_end(l.get("start"))] = trans
 
                         # Track pending translation (mirrors pending_text logic).
                         last_trans = (last_line.get("translation") or "").strip()
@@ -323,6 +343,9 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
 
                 if translate and translate_out is not None:
                     full_translation = " ".join(filter(None, [accumulated_translation, pending_translation])).strip()
+                    # The file is one line per chapter; a newline inside a
+                    # translation would break hyp/ref line alignment.
+                    full_translation = " ".join(full_translation.split())
                     translate_out.write(full_translation + "\n")
                     translate_out.flush()
 
@@ -331,8 +354,25 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
                     for sample in chapter_samples:
                         trans_result = sample.get('translation')
                         if trans_result:
-                            translate_answer_out.write(trans_result + "\n")
+                            translate_answer_out.write(" ".join(trans_result.split()) + "\n")
                     translate_answer_out.flush()
+
+                # Segment-level aligned windows for this chapter
+                if translate and seg_files is not None:
+                    triples = segment_align.aligned_windows(
+                        chapter_samples[0]["audio_path"],
+                        sorted(translation_by_start.items()),
+                    )
+                    for src_text, hyp_text, ref_text in triples:
+                        seg_files["src"].write(src_text + "\n")
+                        seg_files["hyp"].write(hyp_text + "\n")
+                        seg_files["ref"].write(ref_text + "\n")
+                    for f in seg_files.values():
+                        f.flush()
+                    seg_window_count += len(triples)
+                    if not triples:
+                        print(f"[{group_id}] WARNING: no aligned segment windows "
+                              f"(missing reference subtitles next to the audio?)")
 
                 # Combine committed sentences with the final pending sentence (if any).
                 if accumulate_mode == "merge":
@@ -383,6 +423,15 @@ async def run_benchmark(dataset_path, dataset_class_name, websocket_url, output_
     if translate_answer_out is not None:
         translate_answer_out.close()
         print(f"Translation answer (COMET reference) saved to {translate_answer_file}")
+    if seg_files is not None:
+        for f in seg_files.values():
+            f.close()
+        seg_base = os.path.join(translate_dir, output_stem + ".seg.{src,hyp,ref}.txt")
+        print(f"Aligned segment windows ({seg_window_count}) saved to {seg_base}")
+        print(f"Score them with: python benchmarking/calculate_translate_metrics.py "
+              f"-hyp {os.path.join(translate_dir, output_stem + '.seg.hyp.txt')} "
+              f"-ref {os.path.join(translate_dir, output_stem + '.seg.ref.txt')} "
+              f"-src {os.path.join(translate_dir, output_stem + '.seg.src.txt')}")
 
     # Save results
     try:

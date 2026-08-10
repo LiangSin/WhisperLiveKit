@@ -92,9 +92,10 @@ case "$preset" in
   --translate-debug)
     preset_args=(
       --translate
-      --dataset_path dataset/youtube_data/debug/@NTUOCW/PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK/test1
+      --dataset_path dataset/PLCX-BLZ1hDpDOgZPSmdMcpgfO5uQ0i4XK
       --dataset_class YoutubeDataset
       --output benchmarking/results/translate-debug.json
+      --url wss://localhost:8000/asr
     )
     ;;
 esac
