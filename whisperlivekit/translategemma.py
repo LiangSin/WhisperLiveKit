@@ -20,6 +20,23 @@ logger.setLevel(logging.DEBUG)
 
 _MODEL_NAME_TEMPLATE = "Infomaniak-AI/vllm-translategemma-{size}-it"
 
+# Prompt-length budget. 
+_MAX_MODEL_LEN = int(os.environ.get("TRANSLATEGEMMA_MAX_MODEL_LEN", "512"))
+_TEMPLATE_OVERHEAD = 32       # chat template + <<<source/target/text>>> markers
+_SAFETY_MARGIN = 48           # absorbs _estimate_tokens underestimation
+_PENDING_GROWTH_RESERVE = 96  # a pending sentence keeps growing after its context is frozen
+
+
+def _estimate_tokens(text: str) -> int:
+    """Cheap conservative token estimate: CJK char ~ 1 token, other ~ 3 chars/token."""
+    if not text:
+        return 0
+    cjk = sum(
+        1 for ch in text
+        if 0x3000 <= ord(ch) <= 0x9FFF or 0xF900 <= ord(ch) <= 0xFAFF or 0xFF00 <= ord(ch) <= 0xFFEF
+    )
+    return cjk + (len(text) - cjk + 2) // 3
+
 def _resolve_model_name(model_size: str, model_name: Optional[str]) -> str:
     if model_name:
         return model_name
@@ -117,39 +134,62 @@ class TranslateGemmaClient:
             finally:
                 self._client = None
 
-    def _build_messages(self, text: str):
+    def _build_messages(self, text: str, context_src: str = ""):
         return [{
             "role": "user",
             "content": (
                 f"<<<source>>>{self.src_lang}"
                 f"<<<target>>>{self.tgt_lang}"
-                f"<<<text>>>{text}"
+                f"<<<text>>>{context_src}{text}"
             ),
         }]
 
-    async def translate(self, text: str, prefix: Optional[str] = None) -> str:
+    async def translate(
+        self,
+        text: str,
+        prefix: Optional[str] = None,
+        context_src: str = "",
+        context_prefix: str = "",
+        joiner: str = " ",
+    ) -> str:
         """Translate *text* from src_lang to tgt_lang via the remote server.
 
         When *prefix* is given, the decoder is forced to continue from it
         (vLLM ``continue_final_message``) and only the continuation is
         returned, without stripping — the caller stitches ``prefix +
         continuation`` and relies on exact character alignment across calls.
+
+        *context_src* / *context_prefix* inject preceding sentences: the
+        source context is prepended inside ``<<<text>>>`` and its (already
+        validated) translation is forced at the head of the assistant
+        message, so the continuation covers only *text* itself. *joiner*
+        sits between ``context_prefix`` and ``prefix`` and must reproduce
+        the whitespace the model itself emitted at that seam.
         """
         text = (text or "").strip()
         if not text:
             return ""
+        # A forced prefix must never end in whitespace (see the comment in
+        # promotable_prefix_length); the seam whitespace lives in `joiner`
+        # or in the model's own continuation.
+        context_prefix = (context_prefix or "").rstrip()
+
+        if context_prefix and prefix:
+            forced = context_prefix + joiner + prefix
+        else:
+            forced = context_prefix or prefix or ""
 
         client = await self._get_client()
         payload = {
             "model": self.model_name,
-            "messages": self._build_messages(text),
+            "messages": self._build_messages(text, context_src=context_src or ""),
             "temperature": 0,
             "max_tokens": self.max_tokens,
             "stop": ["<eos>", "<end_of_turn>"],
         }
-        if prefix:
+        if forced:
             payload["messages"] = payload["messages"] + [
-                {"role": "assistant", "content": prefix}
+                {"role": "assistant", "content": forced}
             ]
             payload["add_generation_prompt"] = False
             payload["continue_final_message"] = True
@@ -161,7 +201,7 @@ class TranslateGemmaClient:
         response.raise_for_status()
         data = response.json()
         content = data["choices"][0]["message"]["content"]
-        return content if prefix else content.strip()
+        return content if forced else content.strip()
 
     async def translate_batch(self, texts: List[str]) -> List[str]:
         """Translate *texts* concurrently. vLLM batches them on the server side."""
@@ -246,6 +286,10 @@ class GemmaTranslationProcessor:
         asyncio.Lock protecting state.
     sentinel:`
         End-of-stream sentinel object (identity-compared).
+    context_sentences:
+        Max number of preceding validated sentences injected as translation
+        context. 0 disables context entirely (requests are then identical
+        to the context-free behavior).
     """
 
     def __init__(
@@ -255,12 +299,14 @@ class GemmaTranslationProcessor:
         state,
         lock: asyncio.Lock,
         sentinel: object,
+        context_sentences: int = 2,
     ):
         self.client = client
         self.translation_sentence_queue = translation_sentence_queue
         self.state = state
         self.lock = lock
         self.sentinel = sentinel
+        self.context_sentences = context_sentences
         # Stable-prefix state for the current pending-sentence generation
         # (nllw-style): the frozen head of the provisional translation only
         # ever grows, so the displayed caption does not jump around between
@@ -274,12 +320,77 @@ class GemmaTranslationProcessor:
         # translation covering only its content — a free source/target
         # alignment for the commit-time forced prefix (_commit_prefix).
         self._history: List[tuple] = []
+        # Preceding-sentence context, frozen per pending generation
+        # _ctx_joiner is the seam whitespace the model emitted between
+        # the forced context translation and this sentence's translation (None = not yet seen).
+        self._ctx_src: str = ""
+        self._ctx_prefix: str = ""
+        self._ctx_joiner: Optional[str] = None
 
     def _reset_pending_generation(self, gen_start: Optional[float]) -> None:
         self._pending_gen_start = gen_start
         self._stable_prefix = ""
         self._prev_tail = ""
         self._history = []
+        self._ctx_src = ""
+        self._ctx_prefix = ""
+        self._ctx_joiner = None
+
+    async def _select_context(self, target_text: str, reserve: int = 0) -> tuple:
+        """Pick preceding validated sentences that fit the prompt budget.
+
+        Walks completed sentences newest-first and stops at the first one
+        without a validated translation, so the context is always contiguous
+        and immediately precedes the target. Returns ``(ctx_src, ctx_prefix)``,
+        both possibly empty.
+        """
+        if self.context_sentences <= 0:
+            return "", ""
+        budget = (
+            _MAX_MODEL_LEN - self.client.max_tokens - _TEMPLATE_OVERHEAD
+            - _SAFETY_MARGIN - reserve
+            - _estimate_tokens((target_text or "").strip())
+        )
+        if budget <= 0:
+            return "", ""
+        srcs: List[str] = []
+        translations: List[str] = []
+        async with self.lock:
+            sentences = list(self.state.sentence_segments or [])
+            validated = self.state.translation_validated_segments
+            if not isinstance(validated, list):
+                validated = [validated] if validated else []
+            by_start = {t.start: t for t in validated}
+        for s in reversed(sentences):
+            if len(srcs) >= self.context_sentences:
+                break
+            t = by_start.get(s.start)
+            src = (s.text or "").strip()
+            tr = (t.text or "").strip() if t is not None else ""
+            if not src or not tr:
+                break  # keep the context contiguous — never skip over a gap
+            cost = _estimate_tokens(src) + _estimate_tokens(tr)
+            if cost > budget:
+                break
+            budget -= cost
+            srcs.append(src)
+            translations.append(tr)
+        srcs.reverse()
+        translations.reverse()
+        # zh sentences carry their own 。？！ so the sources concatenate
+        # directly; the translations join with plain spaces.
+        return "".join(srcs), " ".join(translations).rstrip()
+
+    def _context_overflows(self, target_text: str) -> bool:
+        """Whether the frozen context no longer fits next to the grown target."""
+        used = (
+            _TEMPLATE_OVERHEAD + 16 + self.client.max_tokens
+            + _estimate_tokens(self._ctx_src)
+            + _estimate_tokens(self._ctx_prefix)
+            + _estimate_tokens((target_text or "").strip())
+            + _estimate_tokens(self._stable_prefix)
+        )
+        return used > _MAX_MODEL_LEN
 
     async def _translate_pending(self, pending_sentence) -> str:
         """Re-translate the pending sentence with a frozen stable prefix.
@@ -292,10 +403,33 @@ class GemmaTranslationProcessor:
         """
         if pending_sentence.start != self._pending_gen_start:
             self._reset_pending_generation(pending_sentence.start)
+            self._ctx_src, self._ctx_prefix = await self._select_context(
+                pending_sentence.text, reserve=_PENDING_GROWTH_RESERVE
+            )
+        elif self._ctx_src and self._context_overflows(pending_sentence.text):
+            # The sentence outgrew the reserve: drop the context and restart
+            # the generation (one-time flicker) instead of risking a vLLM
+            # prompt-length error. The reset clears the context, and the
+            # generation start matching prevents re-selection above.
+            self._reset_pending_generation(pending_sentence.start)
 
         continuation = await self.client.translate(
-            pending_sentence.text, prefix=self._stable_prefix or None
+            pending_sentence.text,
+            prefix=self._stable_prefix or None,
+            context_src=self._ctx_src,
+            context_prefix=self._ctx_prefix,
+            joiner=self._ctx_joiner or " ",
         )
+        if self._ctx_prefix and not self._stable_prefix:
+            # First tick(s) under a forced context: the model emits its own
+            # seam whitespace before this sentence's translation. Freeze it
+            # as the joiner for all later requests of this generation (incl.
+            # commit) and keep processor-local strings free of it, so every
+            # existing alignment invariant operates in context-free space.
+            lead = len(continuation) - len(continuation.lstrip())
+            if self._ctx_joiner is None:
+                self._ctx_joiner = continuation[:lead] or " "
+            continuation = continuation[lead:]
         cut = promotable_prefix_length(self._prev_tail, continuation)
         if cut:
             self._stable_prefix += continuation[:cut]
@@ -306,6 +440,26 @@ class GemmaTranslationProcessor:
         if len(self._history) > 64:
             self._history = self._history[-64:]
         return display
+
+    async def _translate_finalized(
+        self, text: str, prefix: str, ctx_src: str, ctx_prefix: str, joiner: str
+    ) -> str:
+        """Translate a finalized sentence, with a context-free retry.
+
+        A forced context translation can occasionally make the model end the
+        turn immediately (it believes the job is done); in that case fall
+        back to a plain request so the sentence never loses its translation.
+        """
+        r = await self.client.translate(
+            text,
+            prefix=prefix or None,
+            context_src=ctx_src,
+            context_prefix=ctx_prefix,
+            joiner=joiner,
+        )
+        if ctx_prefix and not (prefix + r).strip():
+            r = await self.client.translate(text, prefix=prefix or None)
+        return r
 
     def _commit_prefix(self, sentence_text: str) -> tuple:
         """Forced decoder prefix for a sentence just cut out of the pending text.
@@ -386,6 +540,8 @@ class GemmaTranslationProcessor:
                             # already-displayed frozen prefix so the validated
                             # translation does not jump. The remainder starts
                             # a fresh generation.
+                            ctx_src, ctx_prefix = self._ctx_src, self._ctx_prefix
+                            ctx_joiner = self._ctx_joiner or " "
                             prefix, snapshot = self._commit_prefix(s.text)
                             self._reset_pending_generation(None)
                             if snapshot:
@@ -400,8 +556,15 @@ class GemmaTranslationProcessor:
                                     if tp is not None and tp.start == s.start:
                                         tp.text = snapshot
                                         tp.stable_chars = min(len(prefix), len(snapshot))
+                        else:
+                            # Finalized without a prior pending generation:
+                            # pick context fresh.
+                            ctx_src, ctx_prefix = await self._select_context(s.text)
+                            ctx_joiner = " "
                         commit_prefixes.append(prefix)
-                        tasks.append(self.client.translate(s.text, prefix=prefix or None))
+                        tasks.append(self._translate_finalized(
+                            s.text, prefix, ctx_src, ctx_prefix, ctx_joiner
+                        ))
                     if pending_sentence:
                         tasks.append(self._translate_pending(pending_sentence))
                     results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -471,9 +634,32 @@ class GemmaTranslationProcessor:
 
 if __name__ == "__main__":
     async def _smoke_test():
-        client = TranslateGemmaClient(model_size="4b", src_lang="zh", tgt_lang="en", base_url="https://localhost:8765/v1")
+        client = TranslateGemmaClient(
+            model_size="4b", src_lang="zh", tgt_lang="en",
+            base_url="https://localhost:8765/v1",
+            api_key=os.environ.get("VLLM_API_KEY", "EMPTY"),
+            ssl_verify=False,
+        )
         try:
-            print(await client.translate("你好，最近怎麼樣？"))
+            print("plain:", await client.translate("你好，最近怎麼樣？"))
+
+            # Context A/B: an ambiguous target sentence whose pronoun and
+            # terminology only resolve with the preceding sentence. The
+            # context translation is forced as the assistant prefix, so the
+            # returned continuation must cover ONLY the target sentence —
+            # check that the context translation is not echoed/paraphrased.
+            ctx_src = "我們今天講矩陣的性質。"
+            target = "它的秩是多少？"
+            without_ctx = await client.translate(target)
+            ctx_translation = await client.translate(ctx_src)
+            with_ctx = await client.translate(
+                target, context_src=ctx_src, context_prefix=ctx_translation
+            )
+            print("context source     :", ctx_src)
+            print("context translation:", ctx_translation)
+            print("target             :", target)
+            print("without context    :", without_ctx)
+            print("with context       :", repr(with_ctx))
         finally:
             await client.aclose()
 

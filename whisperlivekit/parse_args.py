@@ -344,6 +344,18 @@ def parse_args():
         ),
     )
 
+    simulstreaming_group.add_argument(
+        "--translation-context-sentences",
+        type=int,
+        default=2,
+        dest="translation_context_sentences",
+        help=(
+            "Number of preceding validated sentences fed as context to "
+            "TranslateGemma requests. 0 disables context. Only used with "
+            "--translation-model translategemma."
+        ),
+    )
+
     parser.add_argument(
         "--no-send-pending",
         action="store_false",

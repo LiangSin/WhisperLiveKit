@@ -274,6 +274,7 @@ class AudioProcessor:
                     state=self.state,
                     lock=self.lock,
                     sentinel=SENTINEL,
+                    context_sentences=getattr(self.args, "translation_context_sentences", 2),
                 )
             else:
                 self.translation = online_translation_factory(self.args, models.translation_model)
