@@ -445,8 +445,7 @@ def parse_args():
         dest="sentence_detection",
         help=(
             "Enable SaT-based sentence boundary detection on validated transcription tokens. "
-            "Detected sentences are sent to connected clients as a 'sentences' field "
-            "(list of {text, start, end} objects). "
+            "Output lines become stable, completed sentences instead of growing lines. "
             "Automatically enabled when --translation-model translategemma is used. "
         ),
     )

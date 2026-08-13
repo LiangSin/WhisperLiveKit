@@ -1,5 +1,11 @@
 # Supported Languages
 
+> **Note**: this page applies to the **NLLW** translation backend
+> (`--translation-model nllw`). The TranslateGemma backend
+> (`--translation-model translategemma`, the production configuration) takes
+> plain ISO codes via `--target-language` (e.g. `en`) and supports the
+> languages listed on the [TranslateGemma model card](https://huggingface.co/google/translategemma-4b-it).
+
 WhisperLiveKit supports translation into **201 languages** from the FLORES-200 dataset through the NLLB (No Language Left Behind) translation system. 
 
 ## How to Specify Languages

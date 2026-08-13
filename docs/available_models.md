@@ -1,5 +1,11 @@
 # Available Whisper model sizes:
 
+> **Fork note**: this deployment does not use a stock size — it runs a
+> Chinese-tuned Whisper (`models/cool-whisper`, set via `WLK_MODEL_PATH` /
+> `--model-path`). The guidance below applies when picking a stock `--model`
+> size instead; for custom/converted checkpoints see
+> [models_compatible_formats.md](models_compatible_formats.md).
+
 - tiny.en (english only)
 - tiny
 - base.en (english only)
