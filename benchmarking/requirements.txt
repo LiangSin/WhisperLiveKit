@@ -1,7 +1,7 @@
-websockets
-jiwer
-tqdm
-numpy
-sacrebleu
-unbabel-comet
+websockets==16.0
+jiwer==4.0.0
+tqdm==4.67.3
+numpy==1.26.4
+sacrebleu==2.6.0
+unbabel-comet==2.2.7
 

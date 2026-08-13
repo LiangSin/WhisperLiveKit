@@ -40,8 +40,24 @@ if [[ "$response" =~ ^([Nn]|[Nn][Oo])$ ]]; then
   exit 1
 fi
 
+info "Installing benchmarking dependencies..."
+pip install -r benchmarking/requirements.txt
+
+info "Checking for ffmpeg..."
+if ! command -v ffmpeg >/dev/null 2>&1; then
+  info "ffmpeg not found in PATH. Attempting to install via conda..."
+  if ! command -v conda >/dev/null 2>&1; then
+    error "conda is not available; cannot install ffmpeg automatically. Please install ffmpeg manually and re-run this script."
+    exit 1
+  fi
+  conda install -y ffmpeg
+  success "ffmpeg installed via conda."
+else
+  info "ffmpeg found in PATH. Skipping conda installation."
+fi
+
 info "Installing hugginface hub..."
-pip install huggingface_hub
+pip install huggingface_hub==0.36.2
 
 
 TARGET_LINK="$REPO_ROOT/models/cool-whisper"
@@ -60,7 +76,21 @@ import os
 from huggingface_hub import hf_hub_download
 
 repo = "andybi7676/cool-whisper-hf"
-filenames = ["model.safetensors", "config.json"]
+# The tokenizer/preprocessor files are required by ct2-transformers-converter,
+# which loads the tokenizer from this directory during conversion.
+filenames = [
+    "model.safetensors",
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "normalizer.json",
+]
 paths = [hf_hub_download(repo_id=repo, filename=name) for name in filenames]
 parent = os.path.dirname(paths[0])
 if any(os.path.dirname(path) != parent for path in paths[1:]):
@@ -85,7 +115,7 @@ else
   info "Converting cool-whisper to CTranslate2 format (float16)..."
   if ! command -v ct2-transformers-converter >/dev/null 2>&1; then
     info "Installing ctranslate2 + transformers for the conversion..."
-    pip install ctranslate2 transformers
+    pip install ctranslate2==4.8.1 transformers==4.57.6 torch==2.13.0
   fi
   CT2_TMP_DIR="$(mktemp -d)"
   # The converter refuses to write into a non-empty directory, so convert to a

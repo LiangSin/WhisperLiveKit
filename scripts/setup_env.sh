@@ -47,7 +47,7 @@ info "Installing benchmarking dependencies..."
 pip install -r benchmarking/requirements.txt
 
 info "Installing additional dependencies..."
-pip install safetensors faster_whisper huggingface_hub yt-dlp nllw ten-vad wtpsplit pillow vllm
+pip install safetensors faster_whisper huggingface_hub==0.36.2 yt-dlp nllw ten-vad wtpsplit pillow vllm
 conda install -c conda-forge libcxx
 
 info "Checking for ffmpeg..."
@@ -79,7 +79,21 @@ import os
 from huggingface_hub import hf_hub_download
 
 repo = "andybi7676/cool-whisper-hf"
-filenames = ["model.safetensors", "config.json"]
+# The tokenizer/preprocessor files are required by ct2-transformers-converter,
+# which loads the tokenizer from this directory during conversion.
+filenames = [
+    "model.safetensors",
+    "config.json",
+    "generation_config.json",
+    "preprocessor_config.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "vocab.json",
+    "merges.txt",
+    "added_tokens.json",
+    "special_tokens_map.json",
+    "normalizer.json",
+]
 paths = [hf_hub_download(repo_id=repo, filename=name) for name in filenames]
 parent = os.path.dirname(paths[0])
 if any(os.path.dirname(path) != parent for path in paths[1:]):
@@ -93,6 +107,32 @@ PY
   success "Created symlink models/cool-whisper -> $DOWNLOAD_DIR"
 else
   info "models/cool-whisper already exists. Skipping download."
+fi
+
+# CTranslate2 encoder weights: with model.bin + vocabulary.json present next to
+# the PyTorch weights (2-4x faster than the PyTorch encoder).
+MODEL_DIR="$(readlink -f "$TARGET_LINK")"
+if [[ -f "$MODEL_DIR/model.bin" ]]; then
+  info "CTranslate2 weights already exist in $MODEL_DIR. Skipping conversion."
+else
+  info "Converting cool-whisper to CTranslate2 format (float16)..."
+  if ! command -v ct2-transformers-converter >/dev/null 2>&1; then
+    info "Installing ctranslate2 + transformers for the conversion..."
+    pip install ctranslate2==4.8.1 transformers==4.57.6 torch==2.13.0
+  fi
+  CT2_TMP_DIR="$(mktemp -d)"
+  # The converter refuses to write into a non-empty directory, so convert to a
+  # temp dir and move only the CT2 artifacts next to the PyTorch weights.
+  if ct2-transformers-converter --model "$MODEL_DIR" \
+      --output_dir "$CT2_TMP_DIR/cool-whisper-ct2" --quantization float16; then
+    mv "$CT2_TMP_DIR/cool-whisper-ct2/model.bin" \
+       "$CT2_TMP_DIR/cool-whisper-ct2/vocabulary.json" "$MODEL_DIR/"
+    rm -rf "$CT2_TMP_DIR"
+    success "CTranslate2 weights installed in $MODEL_DIR"
+  else
+    rm -rf "$CT2_TMP_DIR"
+    warn "CTranslate2 conversion failed; the server will fall back to the PyTorch encoder."
+  fi
 fi
 
 info "Checking for SSL certificates..."
