@@ -40,26 +40,21 @@ services:
     ipc: host
     ports:
       - "${PORT:-8765}:8000"
-    command:
-      - --model
-      - Infomaniak-AI/vllm-translategemma-${MODEL_SIZE:-4b}-it
-      - --dtype
-      - bfloat16
-      - --max-model-len
-      - "${MAX_MODEL_LEN:-512}"
-      - --gpu-memory-utilization
-      - "${GPU_MEMORY_UTILIZATION:-0.85}"
-      - --max-num-seqs
-      - "${MAX_NUM_SEQS:-128}"
-      - --speculative-config
-      - '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4}'
-      - --enforce-eager
-      - --api-key
-      - "${VLLM_API_KEY:-}"
-      - --ssl-certfile
-      - "/app/ssl-config/cert.pem"
-      - --ssl-keyfile
-      - "/app/ssl-config/key.pem"
+    # String-form command: the entrypoint shlex-splits a single string, and
+    # empty ${QUANTIZATION_ARGS} simply disappears — this is what allows the
+    # optional quantization flags below.
+    command: >-
+      --model Infomaniak-AI/vllm-translategemma-${MODEL_SIZE:-4b}-it
+      --dtype ${DTYPE:-bfloat16}
+      ${QUANTIZATION_ARGS:-}
+      --max-model-len ${MAX_MODEL_LEN:-512}
+      --gpu-memory-utilization ${GPU_MEMORY_UTILIZATION:-0.85}
+      --max-num-seqs ${MAX_NUM_SEQS:-128}
+      --speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4}'
+      --enforce-eager
+      --api-key ${VLLM_API_KEY:-}
+      --ssl-certfile /app/ssl-config/cert.pem
+      --ssl-keyfile /app/ssl-config/key.pem
     healthcheck:
       test: ["CMD-SHELL", "curl -kf https://localhost:8000/health || exit 1"]
       interval: 30s
