@@ -19,6 +19,7 @@ logger.setLevel(logging.DEBUG)
 
 SENTINEL = object() # unique sentinel object for end of stream marker
 HALLUCINATION_RESET = object()  # signals SaT/Gemma to clear state when hallucination detected
+FORCE_COMMIT = object()  # lag catch-up: signals SaT to commit the pending sentence immediately
 
 _TOKENS_TRIM_THRESHOLD = 1000
 _TOKENS_KEEP = 750
@@ -165,6 +166,17 @@ class AudioProcessor:
             if self.boh_phrases else "disabled",
         )
 
+        # Lag catch-up (reliability): stream-time seconds the producers have
+        # put into transcription_queue. The consumer compares this against how
+        # much it has ingested to measure the true unprocessed backlog —
+        # wall-clock lag alone cannot distinguish "inference too slow" from
+        # "client stopped sending".
+        self.max_transcription_lag = getattr(self.args, "max_transcription_lag", 10.0)
+        self._enqueued_stream_time = 0.0
+        # After a catch-up jump, end_silence()'s token-anchored time offset
+        # must never rewind timestamps to before the jump.
+        self._catchup_time_floor = 0.0
+
         # Models and processing
         self.asr = models.asr
         self.vac = None
@@ -298,6 +310,7 @@ class AudioProcessor:
                     sentinel=SENTINEL,
                     translation_sentence_queue=self.translation_queue,
                     hallucination_reset=HALLUCINATION_RESET,
+                    force_commit=FORCE_COMMIT,
                     translate_pending=(
                         getattr(self.args, "translate_pending", False)
                         and getattr(self.args, "send_pending", True)
@@ -317,6 +330,7 @@ class AudioProcessor:
                     lock=self.lock,
                     sentinel=SENTINEL,
                     hallucination_reset=HALLUCINATION_RESET,
+                    force_commit=FORCE_COMMIT,
                     silence_commit_timeout=getattr(
                         self.args, "silence_commit_timeout", 2.0
                     ),
@@ -327,6 +341,8 @@ class AudioProcessor:
     async def _push_silence_event(self, silence_buffer: Silence):
         if not self.diarization_before_transcription and self.transcription_queue:
             await self.transcription_queue.put(silence_buffer)
+            if silence_buffer.has_ended and silence_buffer.duration:
+                self._enqueued_stream_time += silence_buffer.duration
         if self.args.diarization and self.diarization_queue:
             await self.diarization_queue.put(silence_buffer)
         if self.translation_queue and not self.use_offline_translation:
@@ -545,6 +561,102 @@ class AudioProcessor:
                 asr_internal_buffer_duration_s = len(getattr(self.transcription, 'audio_buffer', [])) / self.transcription.SAMPLING_RATE
                 transcription_lag_s = max(0.0, time() - self.state.beg_loop - self.state.end_buffer)
                 asr_processing_logs = f"internal_buffer={asr_internal_buffer_duration_s:.2f}s | lag={transcription_lag_s:.2f}s |"
+
+                # --- Lag catch-up (reliability) --------------------------------
+                # Trigger only when BOTH hold:
+                #  - wall-clock lag: we are behind the live edge (false during
+                #    faster-than-realtime replay, e.g. benchmarks);
+                #  - real backlog: audio the producers enqueued but we have not
+                #    ingested yet (false when the lag comes from a client that
+                #    simply stopped sending — nothing to skip there, and acting
+                #    on it would reset the decoder in a loop).
+                # Skipping the backlog drives the second condition back to ~0,
+                # so a single catch-up cannot retrigger itself.
+                backlog_s = max(0.0, self._enqueued_stream_time - cumulative_pcm_duration_stream_time)
+                if (
+                    self.max_transcription_lag > 0
+                    and not self.diarization_before_transcription
+                    and hasattr(self.transcription, "force_refresh")
+                    and transcription_lag_s > self.max_transcription_lag
+                    and backlog_s > self.max_transcription_lag
+                ):
+                    # 1) Final decode pass over the audio already inside the
+                    #    decoder: commits the current hypothesis without the
+                    #    AlignAtt holdback, so nothing already heard is lost.
+                    forced_tokens, _ = await asyncio.to_thread(self.transcription.process_iter, True)
+                    forced_tokens = list(forced_tokens or [])
+
+                    # 2) Skip the backlog: drain the queue, keeping only the
+                    #    time/speaker bookkeeping of what is thrown away.
+                    skipped_s = 0.0
+                    last_speaker = None
+                    sentinel_seen = False
+
+                    def _account(obj):
+                        nonlocal skipped_s, last_speaker, sentinel_seen
+                        if isinstance(obj, np.ndarray):
+                            skipped_s += len(obj) / self.sample_rate
+                        elif isinstance(obj, Silence):
+                            if obj.has_ended and obj.duration:
+                                skipped_s += obj.duration
+                        elif isinstance(obj, ChangeSpeaker):
+                            last_speaker = obj
+                        elif obj is SENTINEL:
+                            sentinel_seen = True
+
+                    _account(item)
+                    if carry_item is not None:
+                        _account(carry_item)
+                        carry_item = None
+                    while not sentinel_seen:
+                        try:
+                            nxt = self.transcription_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        self.transcription_queue.task_done()
+                        _account(nxt)
+
+                    # 3) Jump the stream-time bookkeeping over the skipped span
+                    #    and reset the decoder there: subsequent tokens are
+                    #    stamped from the live edge, monotonically after the
+                    #    committed ones. The skipped span remains a gap in the
+                    #    transcript — by design.
+                    cumulative_pcm_duration_stream_time += skipped_s
+                    new_offset = cumulative_pcm_duration_stream_time
+                    self.transcription.force_refresh(current_time_offset=new_offset)
+                    self.transcription.end = new_offset
+                    self._catchup_time_floor = new_offset
+                    if last_speaker is not None:
+                        self.transcription.model.speaker = last_speaker.speaker
+                    # The rolling hallucination window spans the jump; clear it
+                    # like the BoH reset path does.
+                    self._boh_recent_text = ""
+                    self._repeat_detector.reset()
+
+                    async with self.lock:
+                        self.state.tokens.extend(forced_tokens)
+                        self.state.buffer_transcription = Transcript()
+                        self.state.end_buffer = new_offset
+                        self._trim_state_tokens_locked()
+
+                    if self.translation_queue and not self.use_offline_translation:
+                        for token in forced_tokens:
+                            await self.translation_queue.put(token)
+                    if self.sat_queue:
+                        if forced_tokens:
+                            await self.sat_queue.put(list(forced_tokens))
+                        await self.sat_queue.put(FORCE_COMMIT)
+
+                    logger.warning(
+                        "[lag catch-up] lag=%.1fs backlog=%.1fs > %.1fs: committed %d token(s), "
+                        "skipped %.1fs of audio, resuming at t=%.1fs.",
+                        transcription_lag_s, backlog_s, self.max_transcription_lag,
+                        len(forced_tokens), skipped_s, new_offset,
+                    )
+                    if sentinel_seen:
+                        await self.transcription_queue.put(SENTINEL)
+                    continue
+
                 stream_time_end_of_current_pcm = cumulative_pcm_duration_stream_time
                 new_tokens = []
                 current_audio_processed_upto = self.state.end_buffer
@@ -559,7 +671,14 @@ class AudioProcessor:
                         asr_processing_logs += f" + Silence of = {item.duration:.2f}s"
                         cumulative_pcm_duration_stream_time += item.duration
                         current_audio_processed_upto = cumulative_pcm_duration_stream_time
-                        self.transcription.end_silence(item.duration, self.state.tokens[-1].end if self.state.tokens else 0)
+                        # Anchor on the last token end, but never before the
+                        # catch-up floor: right after a lag catch-up the last
+                        # token still carries a pre-jump timestamp, and using
+                        # it alone would rewind global_time_offset.
+                        self.transcription.end_silence(item.duration, max(
+                            self.state.tokens[-1].end if self.state.tokens else 0,
+                            self._catchup_time_floor,
+                        ))
                     if self.state.tokens:
                         asr_processing_logs += f" | last_end = {self.state.tokens[-1].end} |"
                     logger.info(asr_processing_logs)
@@ -1358,6 +1477,7 @@ class AudioProcessor:
             return
         if not self.diarization_before_transcription and self.transcription_queue:
             await self.transcription_queue.put(pcm_array.copy())
+            self._enqueued_stream_time += len(pcm_array) / self.sample_rate
 
         if self.args.diarization and self.diarization_queue:
             await self.diarization_queue.put(pcm_array.copy())

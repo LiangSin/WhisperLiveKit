@@ -402,6 +402,21 @@ def parse_args():
     )
 
     parser.add_argument(
+        "--max-transcription-lag",
+        type=float,
+        default=10.0,
+        dest="max_transcription_lag",
+        help=(
+            "Reliability catch-up: when transcription falls behind the live "
+            "edge by more than this many seconds of unprocessed audio, the "
+            "current decoder content and pending sentence are force-committed, "
+            "the backlog is dropped, and transcription resumes at the newest "
+            "audio. The skipped span stays untranscribed. Only applies to the "
+            "SimulStreaming backend. 0 disables."
+        ),
+    )
+
+    parser.add_argument(
         "--silence-commit-timeout",
         type=float,
         default=2.0,

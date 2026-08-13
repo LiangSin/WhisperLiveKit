@@ -204,6 +204,10 @@ class SentenceDetectionProcessor:
         Optional queue to forward sentences for offline translation.
     hallucination_reset:
         Object that signals hallucination detected upstream; clears state.
+    force_commit:
+        Object that signals a lag catch-up upstream: the pending sentence is
+        committed immediately (kept, unlike ``hallucination_reset`` which
+        drops it) so the caption is up to date before the stream jumps ahead.
     translate_pending:
         Whether to translate the still-open (pending) sentence in real time.
     pending_translation_interval:
@@ -225,6 +229,7 @@ class SentenceDetectionProcessor:
         sentinel: object,
         translation_sentence_queue: Optional[asyncio.Queue] = None,
         hallucination_reset: Optional[object] = None,
+        force_commit: Optional[object] = None,
         translate_pending: bool = False,
         pending_translation_interval: float = 1.5,
         silence_commit_timeout: float = 2.0,
@@ -236,6 +241,7 @@ class SentenceDetectionProcessor:
         self.sentinel = sentinel
         self.translation_sentence_queue = translation_sentence_queue
         self.hallucination_reset = hallucination_reset
+        self.force_commit = force_commit
         self.translate_pending = translate_pending
         self.pending_translation_interval = pending_translation_interval
         self.silence_commit_timeout = silence_commit_timeout
@@ -342,6 +348,15 @@ class SentenceDetectionProcessor:
                     self._last_pending_key = None
                     self._silence_started_at = None
                     self._silence_flushed = False
+                    self.sat_queue.task_done()
+
+                elif self.force_commit is not None and item is self.force_commit:
+                    logger.info("Lag catch-up: force-committing pending sentence.")
+                    await self._flush_pending_sentence()
+                    # _flush_pending_sentence marks the silence window as
+                    # flushed; outside a silence window that flag must not
+                    # linger or the next real silence would skip its commit.
+                    self._silence_flushed = self._silence_started_at is not None
                     self.sat_queue.task_done()
 
                 elif isinstance(item, Silence):
