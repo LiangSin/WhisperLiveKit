@@ -153,6 +153,16 @@ class AlignAtt:
             self.state.align_source[layer_rank] = heads
             self.state.num_align_heads += 1
 
+        # Publish the spec on the shared decoder so cross-attention QK is
+        # materialised only for alignment heads (SDPA handles the rest).
+        # Idempotent across sessions: the heads derive from the shared model.
+        # Head ordering downstream is irrelevant (they are averaged).
+        spec = {
+            layer: [head_id for _, head_id in heads]
+            for layer, heads in self.state.align_source.items()
+        }
+        self.model.decoder.alignment_spec = spec or None
+
         # Build suppress tokens function
         suppress_tokens = [
             self.tokenizer.transcribe,
@@ -505,14 +515,20 @@ class AlignAtt:
         completed = False
         # punctuation_stop = False
 
-        attn_of_alignment_heads = None
+        attn_last_row = None
         most_attended_frame = None
 
         token_len_before_decoding = current_tokens.shape[1]
-        
+
         l_absolute_timestamps = []
-        
-        accumulated_cross_attns = []
+
+        # Incremental alignment state. The legacy path retained every step's
+        # raw QK and re-softmaxed/re-normalized the whole history per step
+        # (O(steps^2)) although only the newest row is ever consumed; running
+        # per-frame sums reproduce the same normalization exactly.
+        align_sum = None      # (beam, n_align_heads, audio_len) fp32
+        align_sqsum = None
+        align_rows = 0
 
         while not completed and current_tokens.shape[1] < self.max_text_len:  # bos is 3 tokens
 
@@ -525,9 +541,6 @@ class AlignAtt:
             # Get logits and cross-attention weights from decoder
             result = self.logits(tokens_for_logits, encoder_feature, return_cross_attn=True)
             logits, cross_attns = result
-
-            # Accumulate cross-attention from this forward pass
-            accumulated_cross_attns.append(cross_attns)
 
             if new_segment and self.tokenizer.no_speech is not None:
                 probs_at_sot = logits[:, self.state.sot_index, :].float().softmax(dim=-1)
@@ -551,13 +564,36 @@ class AlignAtt:
                 logger.debug(f"Decoding completed: {completed}, sum_logprobs: {sum_logprobs.tolist()}, tokens: ")
                 self.debug_print_tokens(current_tokens)
 
-            # Process accumulated cross-attention weights for alignment
-            attn_of_alignment_heads = self._process_cross_attention(accumulated_cross_attns, content_mel_len)
+            # Fold this step's alignment-head attention rows into the running
+            # per-frame statistics and evaluate only the newest row.
+            new_attn = [a for a in cross_attns if a is not None]
+            if new_attn and self.state.num_align_heads > 0:
+                a_new = torch.cat(
+                    [a if a.dim() == 4 else a.unsqueeze(0) for a in new_attn],
+                    dim=1,
+                ).float()                              # (beam, n_align, rows, audio_len)
+                a_new = F.softmax(a_new, dim=-1)
+                row_sum = a_new.sum(dim=2)
+                row_sqsum = (a_new * a_new).sum(dim=2)
+                if align_sum is None:
+                    align_sum, align_sqsum = row_sum, row_sqsum
+                else:
+                    align_sum = align_sum + row_sum
+                    align_sqsum = align_sqsum + row_sqsum
+                align_rows += a_new.shape[2]
+                mean = align_sum / align_rows
+                std = (align_sqsum / align_rows - mean * mean).clamp_min_(0).sqrt_()
+                last = (a_new[:, :, -1, :] - mean) / (std + 1e-8)
+                last = median_filter(last.unsqueeze(2), 7).squeeze(2)
+                attn_last_row = last.mean(dim=1)[:, :content_mel_len]
+            else:
+                attn_last_row = torch.zeros(
+                    self.cfg.beam_size, content_mel_len, device=self.device)
 
             # for each beam, the most attended frame is. This is the loop's
             # single intentional device->host transfer; everything below
             # derives from the Python list.
-            most_attended_frames = torch.argmax(attn_of_alignment_heads[:, -1, :], dim=-1).tolist()
+            most_attended_frames = torch.argmax(attn_last_row, dim=-1).tolist()
 
             # Calculate absolute timestamps accounting for cumulative offset
             absolute_timestamps = [
@@ -628,7 +664,7 @@ class AlignAtt:
             if logger.isEnabledFor(logging.DEBUG):
                 for i in range(self.cfg.beam_size):
                     logger.debug("attn: {}, current pos: {}, current token: {}({})".format(
-                        attn_of_alignment_heads.shape if attn_of_alignment_heads is not None else None,
+                        attn_last_row.shape if attn_last_row is not None else None,
                         most_attended_frames[i],
                         current_tokens[i, -1].item(),
                         self.tokenizer.decode([current_tokens[i, -1].item()])

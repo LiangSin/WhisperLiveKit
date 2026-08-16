@@ -108,6 +108,8 @@ class MultiHeadAttention(nn.Module):
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
+        need_qk: bool = True,
+        align_heads: Optional[list] = None,
     ):
         q = self.query(x)
 
@@ -130,9 +132,12 @@ class MultiHeadAttention(nn.Module):
                 if kv_cache is not None:
                     kv_cache[self.key_cache_id] = k
                     kv_cache[self.value_cache_id] = v
-            # The QK matrix feeds AlignAtt's attention alignment, so the
-            # manual path that materialises it is required here.
-            wv, qk = self.qkv_attention(q, k, v, mask, need_qk=True)
+            # The QK matrix feeds AlignAtt's attention alignment. With
+            # align_heads set, only those heads' QK is materialised (via a
+            # tiny extra matmul) and the output itself uses SDPA; without it
+            # the legacy full-head manual path is used.
+            wv, qk = self.qkv_attention(
+                q, k, v, mask, need_qk=need_qk, align_heads=align_heads)
 
         return self.out(wv), qk
 
@@ -156,7 +161,7 @@ class MultiHeadAttention(nn.Module):
 
     def qkv_attention(
         self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None,
-        need_qk: bool = False,
+        need_qk: bool = False, align_heads: Optional[list] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
@@ -164,7 +169,8 @@ class MultiHeadAttention(nn.Module):
         k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
-        if SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and not need_qk:
+        use_sdpa = SDPA_AVAILABLE and MultiHeadAttention.use_sdpa
+        if use_sdpa and (not need_qk or align_heads is not None):
             # Note: is_causal is only valid when the query covers the whole
             # sequence (empty kv_cache). In this codebase a multi-token query
             # always comes with a fresh cache; cached steps pass n_ctx == 1,
@@ -174,6 +180,13 @@ class MultiHeadAttention(nn.Module):
             )
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = None
+            if need_qk and align_heads is not None:
+                # Materialise QK only for the alignment heads: a tiny matmul
+                # over |align_heads| heads instead of the full n_head set.
+                # (Cross-attention is always called without a mask.)
+                qh = q[:, align_heads] * scale
+                kh = k[:, align_heads] * scale
+                qk = (qh @ kh.transpose(-1, -2)).float().detach()
         else:
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
             if mask is not None:
@@ -183,6 +196,10 @@ class MultiHeadAttention(nn.Module):
             w = F.softmax(qk, dim=-1).to(q.dtype)
             out = (w @ v).permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = qk.detach()
+            if not need_qk:
+                qk = None
+            elif align_heads is not None:
+                qk = qk[:, align_heads]
 
         return out, qk
 
@@ -218,17 +235,21 @@ class ResidualAttentionBlock(nn.Module):
         xa: Optional[Tensor] = None,
         mask: Optional[Tensor] = None,
         kv_cache: Optional[dict] = None,
+        need_qk: bool = True,
+        align_heads: Optional[list] = None,
     ) -> Tuple[Tensor, Optional[Tensor]]:
         """
         Returns:
             x: The output tensor
-            cross_attn_qk: Cross-attention weights (if cross_attn exists), else None
+            cross_attn_qk: Cross-attention weights (if cross_attn exists and
+                need_qk), else None. With align_heads set, only those heads.
         """
         x = x + self.attn(self.attn_ln(x), mask=mask, kv_cache=kv_cache)[0]
         cross_attn_qk = None
         if self.cross_attn:
             cross_out, cross_attn_qk = self.cross_attn(
-                self.cross_attn_ln(x), xa, kv_cache=kv_cache
+                self.cross_attn_ln(x), xa, kv_cache=kv_cache,
+                need_qk=need_qk, align_heads=align_heads,
             )
             x = x + cross_out
         x = x + self.mlp(self.mlp_ln(x))
@@ -292,6 +313,12 @@ class TextDecoder(nn.Module):
         mask = torch.empty(n_ctx, n_ctx).fill_(-np.inf).triu_(1)
         self.register_buffer("mask", mask, persistent=False)
 
+        # Optional {layer_idx: [head_id, ...]} map of AlignAtt alignment
+        # heads. When set, forward(return_cross_attn=True) materialises QK
+        # only for these heads (SDPA everywhere else); when None, the legacy
+        # full-head manual attention path is used for every cross-attn layer.
+        self.alignment_spec = None
+
     def forward(
         self, 
         x: Tensor, 
@@ -344,9 +371,19 @@ class TextDecoder(nn.Module):
         x = x.to(xa.dtype)
 
         cross_attns = [] if return_cross_attn else None
-        for block in self.blocks:
-            x, cross_attn_qk = block(x, xa, mask=self.mask, kv_cache=kv_cache)
-            if return_cross_attn and cross_attn_qk is not None:
+        spec = self.alignment_spec if return_cross_attn else None
+        for i, block in enumerate(self.blocks):
+            if spec is not None:
+                align_heads = spec.get(i)
+                x, cross_attn_qk = block(
+                    x, xa, mask=self.mask, kv_cache=kv_cache,
+                    need_qk=align_heads is not None, align_heads=align_heads,
+                )
+            else:
+                x, cross_attn_qk = block(x, xa, mask=self.mask, kv_cache=kv_cache)
+            if return_cross_attn:
+                # One entry per layer; None for layers without alignment
+                # heads when alignment_spec is set.
                 cross_attns.append(cross_attn_qk)
 
         x = self.ln(x)

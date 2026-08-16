@@ -162,6 +162,10 @@ def main():
         })
         print(f"round {r:3d}: {dt*1000:7.1f} ms  forwards={n_fwd:3d}  "
               f"tokens={len(tokens):3d}  syncs={sync_warns}", flush=True)
+        if tokens:
+            # Word/timestamp dump for cross-commit equivalence diffs.
+            print("  words: " + " ".join(
+                f"{t.text}@{t.start:.2f}-{t.end:.2f}" for t in tokens), flush=True)
 
         if profiling:
             evts = prof.key_averages()
