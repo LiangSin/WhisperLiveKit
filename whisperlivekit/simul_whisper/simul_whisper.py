@@ -573,8 +573,12 @@ class AlignAtt:
                     dim=1,
                 ).float()                              # (beam, n_align, rows, audio_len)
                 a_new = F.softmax(a_new, dim=-1)
-                row_sum = a_new.sum(dim=2)
-                row_sqsum = (a_new * a_new).sum(dim=2)
+                # Accumulate in float64: the E[x^2]-mean^2 variance form
+                # cancels catastrophically in fp32 exactly on the strongly
+                # attended frame columns (large mean, tiny variance) that
+                # decide the alignment argmax.
+                row_sum = a_new.sum(dim=2, dtype=torch.float64)
+                row_sqsum = (a_new * a_new).sum(dim=2, dtype=torch.float64)
                 if align_sum is None:
                     align_sum, align_sqsum = row_sum, row_sqsum
                 else:
@@ -583,8 +587,8 @@ class AlignAtt:
                 align_rows += a_new.shape[2]
                 mean = align_sum / align_rows
                 std = (align_sqsum / align_rows - mean * mean).clamp_min_(0).sqrt_()
-                last = (a_new[:, :, -1, :] - mean) / (std + 1e-8)
-                last = median_filter(last.unsqueeze(2), 7).squeeze(2)
+                last = (a_new[:, :, -1, :].double() - mean) / (std + 1e-8)
+                last = median_filter(last.float().unsqueeze(2), 7).squeeze(2)
                 attn_last_row = last.mean(dim=1)[:, :content_mel_len]
             else:
                 attn_last_row = torch.zeros(

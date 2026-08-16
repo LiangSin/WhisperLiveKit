@@ -132,12 +132,15 @@ class MultiHeadAttention(nn.Module):
                 if kv_cache is not None:
                     kv_cache[self.key_cache_id] = k
                     kv_cache[self.value_cache_id] = v
-            # The QK matrix feeds AlignAtt's attention alignment. With
-            # align_heads set, only those heads' QK is materialised (via a
-            # tiny extra matmul) and the output itself uses SDPA; without it
-            # the legacy full-head manual path is used.
+            # The QK matrix feeds AlignAtt's attention alignment. Cross
+            # attention always takes the manual fp32-softmax path so decoder
+            # numerics stay identical to the legacy implementation (SDPA's
+            # fp16 softmax shifts logits enough to flip borderline tokens —
+            # measured as a WER regression); align_heads only restricts which
+            # heads' QK is returned.
             wv, qk = self.qkv_attention(
-                q, k, v, mask, need_qk=need_qk, align_heads=align_heads)
+                q, k, v, mask, need_qk=need_qk, align_heads=align_heads,
+                allow_sdpa=False)
 
         return self.out(wv), qk
 
@@ -162,6 +165,7 @@ class MultiHeadAttention(nn.Module):
     def qkv_attention(
         self, q: Tensor, k: Tensor, v: Tensor, mask: Optional[Tensor] = None,
         need_qk: bool = False, align_heads: Optional[list] = None,
+        allow_sdpa: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         n_batch, n_ctx, n_state = q.shape
         scale = (n_state // self.n_head) ** -0.25
@@ -169,8 +173,8 @@ class MultiHeadAttention(nn.Module):
         k = k.view(*k.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
         v = v.view(*v.shape[:2], self.n_head, -1).permute(0, 2, 1, 3)
 
-        use_sdpa = SDPA_AVAILABLE and MultiHeadAttention.use_sdpa
-        if use_sdpa and (not need_qk or align_heads is not None):
+        use_sdpa = SDPA_AVAILABLE and MultiHeadAttention.use_sdpa and allow_sdpa
+        if use_sdpa and not need_qk:
             # Note: is_causal is only valid when the query covers the whole
             # sequence (empty kv_cache). In this codebase a multi-token query
             # always comes with a fresh cache; cached steps pass n_ctx == 1,
@@ -180,13 +184,6 @@ class MultiHeadAttention(nn.Module):
             )
             out = a.permute(0, 2, 1, 3).flatten(start_dim=2)
             qk = None
-            if need_qk and align_heads is not None:
-                # Materialise QK only for the alignment heads: a tiny matmul
-                # over |align_heads| heads instead of the full n_head set.
-                # (Cross-attention is always called without a mask.)
-                qh = q[:, align_heads] * scale
-                kh = k[:, align_heads] * scale
-                qk = (qh @ kh.transpose(-1, -2)).float().detach()
         else:
             qk = (q * scale) @ (k * scale).transpose(-1, -2)
             if mask is not None:

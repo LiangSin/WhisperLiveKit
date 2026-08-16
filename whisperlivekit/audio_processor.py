@@ -1389,24 +1389,21 @@ class AudioProcessor:
         if not self.args.vac and self.current_silence:
             await self._end_silence()
 
+        # Process when enough data. Chunk sizing is kept identical to the
+        # original implementation: VAD event samples are clamped to chunk
+        # boundaries below, so changing the chunking changes silence
+        # boundaries (measured as a WER shift). Only the Silero call itself
+        # is moved off the event loop.
+        if len(self.pcm_buffer) < self.bytes_per_sec:
+            return
+
         if len(self.pcm_buffer) > self.max_bytes_per_sec:
             logger.warning(
                 f"Audio buffer too large: {len(self.pcm_buffer) / self.bytes_per_sec:.2f}s. "
                 f"Consider using a smaller model."
             )
 
-        # Drain in <=1s slices (with awaits in between) instead of one call of
-        # up to max_bytes_per_sec: a post-stall backlog otherwise runs ~150
-        # Silero windows back-to-back and blocks the event loop for every
-        # other connection.
-        while len(self.pcm_buffer) >= self.bytes_per_sec:
-            await self._handle_pcm_slice()
-
-        if not self.args.transcription and not self.args.diarization:
-            await asyncio.sleep(0.1)
-
-    async def _handle_pcm_slice(self):
-        chunk_size = min(len(self.pcm_buffer), self.bytes_per_sec)
+        chunk_size = min(len(self.pcm_buffer), self.max_bytes_per_sec)
         aligned_chunk_size = (chunk_size // self.bytes_per_sample) * self.bytes_per_sample
 
         if aligned_chunk_size == 0:
@@ -1489,6 +1486,9 @@ class AudioProcessor:
             )[-self._preroll_max_samples:]
 
         self.total_pcm_samples = chunk_sample_end
+
+        if not self.args.transcription and not self.args.diarization:
+            await asyncio.sleep(0.1)
 
     async def _emit_active_audio(self, segment, seg_start_sample):
         """Enqueue active audio, withholding the part that falls inside the

@@ -89,30 +89,20 @@ class StreamingSentenceDetector:
         self.pending_tokens.extend(t for t in new_tokens if t.text)
         pending_text = "".join(t.text for t in self.pending_tokens)
         n_tokens = len(self.pending_tokens)
-        if not pending_text:
-            return []
 
-        # Single SaT forward per push: split() is just predict_proba() plus a
-        # threshold postprocess, and the soft/hard-limit fallbacks reuse the
-        # same probability array instead of running a second full forward.
-        import numpy as np
-        from wtpsplit.utils import indices_to_sentences
+        # The shared SaT model is called from to_thread workers of many
+        # sessions; serialize access.
         with _SAT_LOCK:
-            probs = self.sat.predict_proba(pending_text)
-        segments = indices_to_sentences(
-            pending_text,
-            np.where(probs > _SAT_SENTENCE_THRESHOLD)[0],
-            strip_whitespace=False,
-        )
+            segments = self.sat.split(pending_text)
 
         if len(segments) < 2 and n_tokens >= self.soft_max_tokens:
-            split = self._best_split_point(pending_text, probs)
+            split = self._best_split_point(pending_text)
             if split is not None and split[1] >= self.soft_min_prob:
                 segments = [pending_text[:split[0] + 1], pending_text[split[0] + 1:]]
                 logger.debug("Soft limit split: %s", segments)
 
         if len(segments) < 2 and n_tokens >= self.max_tokens:
-            split = self._best_split_point(pending_text, probs)
+            split = self._best_split_point(pending_text)
             if split is not None:
                 segments = [pending_text[:split[0] + 1], pending_text[split[0] + 1:]]
                 logger.debug("Hard limit split: %s", segments)
@@ -123,10 +113,12 @@ class StreamingSentenceDetector:
 
         return self._extract_sentences(segments)
 
-    def _best_split_point(self, text: str, probs):
+    def _best_split_point(self, text: str):
         """Return (char_index, probability) of the best split in the first 80%,
         or None if every position has probability 0."""
         import numpy as np
+        with _SAT_LOCK:
+            probs = self.sat.predict_proba(text)
         cutoff = max(1, int(len(text) * 0.8))
         best = int(np.argmax(probs[:cutoff]))
         if probs[best] < 1e-6:
