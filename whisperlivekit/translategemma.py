@@ -12,6 +12,7 @@ Public surface:
 import asyncio
 import logging
 import os
+import time
 import traceback
 from typing import List, Optional
 
@@ -300,6 +301,7 @@ class GemmaTranslationProcessor:
         lock: asyncio.Lock,
         sentinel: object,
         context_sentences: int = 2,
+        batch_window: float = 0.0,
     ):
         self.client = client
         self.translation_sentence_queue = translation_sentence_queue
@@ -307,6 +309,12 @@ class GemmaTranslationProcessor:
         self.lock = lock
         self.sentinel = sentinel
         self.context_sentences = context_sentences
+        # When > 0, dispatch is held until the next wall-clock multiple of
+        # this window (+50 ms grace) so requests from every connection and
+        # every server process on the host leave in one synchronized burst —
+        # vLLM then serves the whole burst as a single continuous-batching
+        # round and the GPU idles between ticks.
+        self.batch_window = batch_window
         # Stable-prefix state for the current pending-sentence generation
         # (nllw-style): the frozen head of the provisional translation only
         # ever grows, so the displayed caption does not jump around between
@@ -498,6 +506,13 @@ class GemmaTranslationProcessor:
                     logger.debug("GemmaTranslationProcessor: sentinel received.")
                     self.translation_sentence_queue.task_done()
                     break
+
+                if self.batch_window > 0:
+                    # Hold until just past the next shared wall-clock tick
+                    # (+50 ms so snapshots enqueued exactly on the tick are
+                    # included in this round's drain).
+                    w = self.batch_window
+                    await asyncio.sleep(w - ((time.time() - 0.05) % w))
 
                 # Drain available items for local batching
                 items = [item]

@@ -13,7 +13,7 @@ import logging
 import traceback
 import torch
 from collections import Counter
-from time import monotonic
+from time import monotonic, time as wall_time
 from typing import List, Optional
 
 from whisperlivekit.timed_objects import ASRToken, Sentence, Silence, Line
@@ -266,7 +266,13 @@ class SentenceDetectionProcessor:
         provisional translation, so translated captions keep up with speech
         instead of waiting for a SaT boundary."""
         while True:
-            await asyncio.sleep(self.pending_translation_interval)
+            # Align ticks to wall-clock multiples of the interval so every
+            # connection — across all server processes — snapshots at the same
+            # instant: the translation requests then reach vLLM together and
+            # are served as one continuous-batching burst instead of scattered
+            # singleton requests that keep the GPU context busy all second.
+            interval = self.pending_translation_interval
+            await asyncio.sleep(interval - (wall_time() % interval))
             async with self.lock:
                 pending = self.state.sentence_pending
                 snapshot = (
