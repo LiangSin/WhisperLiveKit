@@ -134,6 +134,11 @@ class AudioProcessor:
         self.lock = asyncio.Lock()
         self.sep = " "  # Default separator
         self.last_response_content = FrontData()
+        # results_formatter change-gating (see _content_fingerprint)
+        self._last_content_fp = None
+        self._cached_lines = None
+        self._cached_undiarized = None
+        self._last_pushed_times = None
         self.last_detected_speaker = None
         self.speaker_languages = {}
         self.diarization_before_transcription = False
@@ -410,6 +415,35 @@ class AudioProcessor:
             self.state.last_punctuation_index = max(0, self.state.last_punctuation_index - excess)
         logger.debug("Trimmed %d old tokens, keeping %d", excess, _TOKENS_KEEP)
 
+    def _content_fingerprint(self):
+        """Cheap change signature of everything the results formatter's line
+        output derives from. Must be called under self.lock. The wall-clock
+        remaining_time fields are deliberately excluded — they change every
+        tick and are patched into the response without reformatting."""
+        s = self.state
+        last_tok = s.tokens[-1] if s.tokens else None
+        sent = getattr(s, "sentence_segments", None)
+        sp = getattr(s, "sentence_pending", None)
+        tv = s.translation_validated_segments
+        tp = s.translation_pending
+        bt = s.buffer_transcription
+        return (
+            len(s.tokens),
+            (last_tok.end, last_tok.text) if last_tok is not None else None,
+            len(sent) if sent is not None else -1,
+            (sent[-1].start, sent[-1].text) if sent else None,
+            (sp.start, sp.text) if sp is not None else None,
+            len(tv) if isinstance(tv, list) else -1,
+            tv[-1].text if isinstance(tv, list) and tv else None,
+            (tp.text, tp.stable_chars) if tp is not None else None,
+            bt.text if bt is not None else "",
+            getattr(s.buffer_translation, "text", s.buffer_translation) or "",
+            s.end_buffer,
+            s.end_attributed_speaker,
+            self.current_silence is not None,
+            self.is_stopping,
+        )
+
     async def get_current_state(self):
         """Get current state."""
         async with self.lock:
@@ -676,17 +710,20 @@ class AudioProcessor:
                         # catch-up floor: right after a lag catch-up the last
                         # token still carries a pre-jump timestamp, and using
                         # it alone would rewind global_time_offset.
-                        self.transcription.end_silence(item.duration, max(
-                            self.state.tokens[-1].end if self.state.tokens else 0,
-                            self._catchup_time_floor,
-                        ))
+                        await asyncio.to_thread(
+                            self.transcription.end_silence, item.duration, max(
+                                self.state.tokens[-1].end if self.state.tokens else 0,
+                                self._catchup_time_floor,
+                            ))
                     if self.state.tokens:
                         asr_processing_logs += f" | last_end = {self.state.tokens[-1].end} |"
                     logger.info(asr_processing_logs)
                     new_tokens = new_tokens or []
                     current_audio_processed_upto = max(current_audio_processed_upto, stream_time_end_of_current_pcm)
                 elif isinstance(item, ChangeSpeaker):
-                    self.transcription.new_speaker(item)
+                    # new_speaker runs a final process_iter internally — keep
+                    # that decode off the event loop like the other calls.
+                    await asyncio.to_thread(self.transcription.new_speaker, item)
                     continue
                 elif isinstance(item, np.ndarray):
                     pcm_array = item
@@ -1063,16 +1100,29 @@ class AudioProcessor:
                     continue
 
                 state = await self.get_current_state()
-                
+
                 async with self.lock:
                     tokens_snapshot = list(self.state.tokens)
+                    content_fp = self._content_fingerprint()
 
                 # Snapshotted before formatting and reused by the termination
                 # check below, so the last iteration always formats with
                 # final_flush=True and withheld lines are released before exit.
                 final_flush = self.is_stopping and self._processing_tasks_done()
 
-                if self.sentence_detector:
+                # Only re-run the (token-copying, Line-rebuilding) formatter
+                # when the content it derives from actually changed; the
+                # remaining_time fields advance with the wall clock every
+                # tick and are patched into the response separately below.
+                content_changed = (
+                    content_fp != self._last_content_fp
+                    or final_flush
+                    or self._cached_lines is None
+                )
+                if not content_changed:
+                    lines = self._cached_lines
+                    undiarized_text = self._cached_undiarized
+                elif self.sentence_detector:
                     from whisperlivekit.sentence_detector import format_sentence_lines
                     # With send_pending off, a finalized sentence is sent only
                     # once its translation has arrived, so caption and
@@ -1098,6 +1148,10 @@ class AudioProcessor:
                         sep=self.sep,
                         tokens=tokens_snapshot,
                     )
+                if content_changed:
+                    self._last_content_fp = content_fp
+                    self._cached_lines = lines
+                    self._cached_undiarized = undiarized_text
                 if lines and lines[-1].speaker == -2:
                     buffer_transcription = Transcript()
                 else:
@@ -1141,12 +1195,17 @@ class AudioProcessor:
                     remaining_time_diarization=state.remaining_time_diarization if self.args.diarization else 0
                 )
                                 
-                should_push = (response != self.last_response_content)
+                # content_fp covers everything lines/buffers derive from, so
+                # a deep dataclass compare of the whole response is redundant;
+                # only the wall-clock remaining_time fields need checking.
+                pushed_times = (response.remaining_time_transcription,
+                                response.remaining_time_diarization)
+                should_push = content_changed or pushed_times != self._last_pushed_times
                 if should_push and (lines or buffer_transcription or buffer_diarization or response_status == "no_audio_detected"):
                     if self.archive_writer and lines:
                         self.archive_writer.ingest_lines(lines)
                     yield response
-                    self.last_response_content = response
+                    self._last_pushed_times = pushed_times
                 if self.archive_writer:
                     self.archive_writer.flush_subtitles_if_due()
                 
@@ -1330,17 +1389,24 @@ class AudioProcessor:
         if not self.args.vac and self.current_silence:
             await self._end_silence()
 
-        # Process when enough data
-        if len(self.pcm_buffer) < self.bytes_per_sec:
-            return
-
         if len(self.pcm_buffer) > self.max_bytes_per_sec:
             logger.warning(
                 f"Audio buffer too large: {len(self.pcm_buffer) / self.bytes_per_sec:.2f}s. "
                 f"Consider using a smaller model."
             )
 
-        chunk_size = min(len(self.pcm_buffer), self.max_bytes_per_sec)
+        # Drain in <=1s slices (with awaits in between) instead of one call of
+        # up to max_bytes_per_sec: a post-stall backlog otherwise runs ~150
+        # Silero windows back-to-back and blocks the event loop for every
+        # other connection.
+        while len(self.pcm_buffer) >= self.bytes_per_sec:
+            await self._handle_pcm_slice()
+
+        if not self.args.transcription and not self.args.diarization:
+            await asyncio.sleep(0.1)
+
+    async def _handle_pcm_slice(self):
+        chunk_size = min(len(self.pcm_buffer), self.bytes_per_sec)
         aligned_chunk_size = (chunk_size // self.bytes_per_sample) * self.bytes_per_sample
 
         if aligned_chunk_size == 0:
@@ -1354,7 +1420,10 @@ class AudioProcessor:
 
         vad_events = []
         if self.args.vac:
-            vad_events = self.vac(pcm_array) or []
+            # Silero runs ~31 windows/s per connection; keep it off the event
+            # loop. Slices are processed sequentially per connection, so the
+            # stateful iterator sees ordered input.
+            vad_events = await asyncio.to_thread(self.vac, pcm_array) or []
 
         # Iterate over events in chronological order and segment the PCM chunk:
         #   [last_offset, end_offset]   -> active audio (tail of speech)
@@ -1420,9 +1489,6 @@ class AudioProcessor:
             )[-self._preroll_max_samples:]
 
         self.total_pcm_samples = chunk_sample_end
-
-        if not self.args.transcription and not self.args.diarization:
-            await asyncio.sleep(0.1)
 
     async def _emit_active_audio(self, segment, seg_start_sample):
         """Enqueue active audio, withholding the part that falls inside the

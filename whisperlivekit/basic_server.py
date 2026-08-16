@@ -199,7 +199,15 @@ async def websocket_endpoint(websocket: WebSocket):
 def main():
     """Entry point for the CLI command."""
     import uvicorn
-    
+
+    # Torch CPU intra-op threading: many per-connection stages run torch ops
+    # from to_thread workers; with the OMP default each op fans out to
+    # OMP_NUM_THREADS threads and N connections oversubscribe the host.
+    # GPU work is unaffected. CT2/ONNX threading is configured separately.
+    import os
+    import torch
+    torch.set_num_threads(int(os.environ.get("WLK_TORCH_NUM_THREADS", "1")))
+
     uvicorn_kwargs = {
         "app": "whisperlivekit.basic_server:app",
         "host":args.host, 

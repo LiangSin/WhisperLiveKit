@@ -153,6 +153,7 @@ class ConnectionArchiveWriter:
         self._transcript_fp.write(_format_srt_block(self._transcript_index, start, end, clean_text))
         self._transcript_index += 1
         self._emitted_transcript.add(key)
+        self._prune_emitted(self._emitted_transcript, key)
 
     def _write_translation_cue(self, start: float, end: float, text: str) -> None:
         clean_text = (text or "").strip()
@@ -164,6 +165,18 @@ class ConnectionArchiveWriter:
         self._translation_fp.write(_format_srt_block(self._translation_index, start, end, clean_text))
         self._translation_index += 1
         self._emitted_translation.add(key)
+        self._prune_emitted(self._emitted_translation, key)
+
+    @staticmethod
+    def _prune_emitted(emitted: set, latest_key: _CueKey) -> None:
+        """Keep the dedup sets bounded on long sessions: cues can only
+        re-arrive from the formatter's recent-line window, so keys far behind
+        the newest cue are dead weight."""
+        if len(emitted) > 4096:
+            horizon = latest_key[1] - 600_000  # 10 min behind newest end_ms
+            stale = [k for k in emitted if k[1] < horizon]
+            for k in stale:
+                emitted.discard(k)
 
     @staticmethod
     def _line_tuple(line):

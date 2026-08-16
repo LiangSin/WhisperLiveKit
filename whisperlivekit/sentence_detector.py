@@ -10,6 +10,7 @@ Public surface:
 import asyncio
 import bisect
 import logging
+import threading
 import traceback
 import torch
 from collections import Counter
@@ -20,6 +21,17 @@ from whisperlivekit.timed_objects import ASRToken, Sentence, Silence, Line
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
+
+# One SaT model is shared by every connection and called from to_thread
+# workers; serialize access (an nn.Module forward is not thread-safe under
+# concurrent mutation of e.g. batch-dependent buffers, and interleaved use
+# was previously unguarded).
+_SAT_LOCK = threading.Lock()
+
+# wtpsplit's SaT.split() with default arguments is predict_proba() followed
+# by indices_to_sentences(text, where(probs > 0.01)) — see wtpsplit._split
+# ("the established default for newline prob threshold is 0.01").
+_SAT_SENTENCE_THRESHOLD = 0.01
 
 # ---------------------------------------------------------------------------
 # Core sentence splitter
@@ -77,17 +89,30 @@ class StreamingSentenceDetector:
         self.pending_tokens.extend(t for t in new_tokens if t.text)
         pending_text = "".join(t.text for t in self.pending_tokens)
         n_tokens = len(self.pending_tokens)
+        if not pending_text:
+            return []
 
-        segments = self.sat.split(pending_text)
+        # Single SaT forward per push: split() is just predict_proba() plus a
+        # threshold postprocess, and the soft/hard-limit fallbacks reuse the
+        # same probability array instead of running a second full forward.
+        import numpy as np
+        from wtpsplit.utils import indices_to_sentences
+        with _SAT_LOCK:
+            probs = self.sat.predict_proba(pending_text)
+        segments = indices_to_sentences(
+            pending_text,
+            np.where(probs > _SAT_SENTENCE_THRESHOLD)[0],
+            strip_whitespace=False,
+        )
 
         if len(segments) < 2 and n_tokens >= self.soft_max_tokens:
-            split = self._best_split_point(pending_text)
+            split = self._best_split_point(pending_text, probs)
             if split is not None and split[1] >= self.soft_min_prob:
                 segments = [pending_text[:split[0] + 1], pending_text[split[0] + 1:]]
                 logger.debug("Soft limit split: %s", segments)
 
         if len(segments) < 2 and n_tokens >= self.max_tokens:
-            split = self._best_split_point(pending_text)
+            split = self._best_split_point(pending_text, probs)
             if split is not None:
                 segments = [pending_text[:split[0] + 1], pending_text[split[0] + 1:]]
                 logger.debug("Hard limit split: %s", segments)
@@ -98,11 +123,10 @@ class StreamingSentenceDetector:
 
         return self._extract_sentences(segments)
 
-    def _best_split_point(self, text: str):
+    def _best_split_point(self, text: str, probs):
         """Return (char_index, probability) of the best split in the first 80%,
         or None if every position has probability 0."""
         import numpy as np
-        probs = self.sat.predict_proba(text)
         cutoff = max(1, int(len(text) * 0.8))
         best = int(np.argmax(probs[:cutoff]))
         if probs[best] < 1e-6:
