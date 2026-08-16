@@ -347,11 +347,15 @@ class SimulStreamingASR():
             else:
                 fw_model = self.model_name
             fw_device, fw_device_index = _parse_device_for_ct2(self.whisper_device)
+            # num_workers > 1 lets concurrent sessions' encode() calls run in
+            # parallel inside CTranslate2; the default (1) serializes every
+            # session's full-window encode behind a single worker.
             self.fw_encoder = WhisperModel(
                 fw_model,
                 device=fw_device,
                 compute_type='auto',
                 device_index=fw_device_index,
+                num_workers=max(1, int(getattr(self, "ct2_encoder_workers", 2) or 1)),
             )
 
         # A single model instance shared by all sessions. The hookless

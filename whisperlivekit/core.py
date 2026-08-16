@@ -145,6 +145,7 @@ class TranscriptionEngine:
                     "init_prompt": None,
                     "static_init_prompt": None,
                     "max_context_tokens": None,
+                    "ct2_encoder_workers": 2,
                 }
                 simulstreaming_params = update_with_kwargs(simulstreaming_params, kwargs)
                 

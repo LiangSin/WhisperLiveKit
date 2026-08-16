@@ -229,6 +229,15 @@ def parse_args():
     )
 
     simulstreaming_group.add_argument(
+        "--ct2-encoder-workers",
+        type=int,
+        default=2,
+        dest="ct2_encoder_workers",
+        help="CTranslate2 encoder worker count. >1 lets concurrent sessions "
+             "encode in parallel instead of queueing behind one worker.",
+    )
+
+    simulstreaming_group.add_argument(
         "--custom-alignment-heads",
         type=str,
         default=None,
