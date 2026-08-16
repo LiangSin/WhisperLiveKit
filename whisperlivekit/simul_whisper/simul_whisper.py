@@ -166,8 +166,17 @@ class AlignAtt:
             suppress_tokens.append(self.tokenizer.no_speech)
         suppress_tokens = tuple(sorted(set(suppress_tokens)))
         logger.debug(f"Suppress tokens: {suppress_tokens}")
-        sup_tokens = SuppressTokens(suppress_tokens)
-        self.state.suppress_tokens_fn = lambda logits: sup_tokens.apply(logits, None)
+        # Persistent additive mask: index assignment (`logits[:, ids] = -inf`)
+        # syncs the device on every decode step; an in-place add of a
+        # precomputed -inf mask is a pure device op.
+        suppress_mask = torch.zeros(self.model.dims.n_vocab, device=self.device)
+        suppress_mask[list(suppress_tokens)] = float("-inf")
+
+        def _suppress(logits, _mask=suppress_mask):
+            logits.add_(_mask)
+
+        self.state.suppress_tokens_fn = _suppress
+        self._refresh_new_segment_suppress()
 
         # Initialize tokens
         self.init_tokens()
@@ -177,7 +186,10 @@ class AlignAtt:
         self.state.decoder_type = cfg.decoder_type
         if cfg.decoder_type == "greedy":
             logger.info("Using greedy decoder")
-            self.state.token_decoder = GreedyDecoder(0.0, self.tokenizer.eot)
+            self.state.token_decoder = GreedyDecoder(
+                0.0, self.tokenizer.eot,
+                need_logprobs=logger.isEnabledFor(logging.DEBUG),
+            )
         elif cfg.decoder_type == "beam":
             logger.info("Using beam decoder")
             self.state.inference = BeamPyTorchInference(self.model, self.state.initial_token_length)
@@ -199,12 +211,21 @@ class AlignAtt:
 
     def create_tokenizer(self, language=None):
         self.tokenizer = tokenizer.get_tokenizer(
-            multilingual=self.tokenizer_is_multilingual,  
+            multilingual=self.tokenizer_is_multilingual,
             language=language,
             num_languages=self.model.num_languages,
             task=self.decode_options.task
         )
         self.state.tokenizer = self.tokenizer
+        self._refresh_new_segment_suppress()
+
+    def _refresh_new_segment_suppress(self):
+        # Precomputed additive mask for the blank/eot suppression applied at
+        # the start of every segment (avoids a BPE encode + a syncing index
+        # assignment per round).
+        mask = torch.zeros(self.model.dims.n_vocab, device=self.device)
+        mask[self.tokenizer.encode(" ") + [self.tokenizer.eot]] = float("-inf")
+        self._new_segment_suppress = mask
 
     def init_context(self):
         kw = {'tokenizer': self.tokenizer, 
@@ -229,9 +250,10 @@ class AlignAtt:
         self.state.tokens = [self.state.initial_tokens]
 
     def trim_context(self):
-        logger.info("Trimming context")
+        logger.debug("Trimming context")
         c = len(self.state.context.as_token_ids()) - len(self.state.context.prefix_token_ids)
-        logger.info(f"Context text: {self.state.context.as_text()}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Context text: {self.state.context.as_text()}")
         l = sum(t.shape[1] for t in self.state.tokens) + c
         if self.cfg.static_init_prompt is None:
             after = 0
@@ -244,7 +266,8 @@ class AlignAtt:
             logger.debug(f"len {l}, c {c}, max_context_tokens {self.max_context_tokens}")
             if t == 0:
                 break
-        logger.info(f"Context after trim: {self.state.context.text} (len: {l})")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Context after trim: {self.state.context.text} (len: {l})")
 
 
     def logits(
@@ -313,6 +336,8 @@ class AlignAtt:
 
 
     def debug_print_tokens(self, tokens):
+        if not logger.isEnabledFor(logging.DEBUG):
+            return  # tokens[i].tolist() below is a device sync — skip entirely
         for i in range(self.cfg.beam_size):
             logger.debug(self.tokenizer.decode_with_timestamps(tokens[i].tolist()))
 
@@ -353,7 +378,7 @@ class AlignAtt:
         """Clean the kv_cache after each inference step."""
         self.state.clean_cache()
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def lang_id(self, encoder_features):
         """Language detection from encoder features.
         This code is trimmed and copy-pasted from whisper.decoding.detect_language.
@@ -388,7 +413,7 @@ class AlignAtt:
 
     ### transcription / translation
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def infer(self, is_last=False):
         new_segment = True
         if len(self.state.segments) == 0:
@@ -396,7 +421,6 @@ class AlignAtt:
             return []
         if not self._apply_minseglen():
             logger.debug(f"applied minseglen {self.cfg.audio_min_len} > {self.segments_len()}.")
-            input_segments = torch.cat(self.state.segments, dim=0)
             return []
 
         # input_segments is concatenation of audio, it's one array
@@ -516,33 +540,38 @@ class AlignAtt:
 
             # suppress blank tokens only at the beginning of the segment
             if new_segment:
-                logits[:, self.tokenizer.encode(" ") + [self.tokenizer.eot]] = -np.inf
+                logits.add_(self._new_segment_suppress)
             new_segment = False
             self.state.suppress_tokens_fn(logits)
             current_tokens, completed = self.state.token_decoder.update(current_tokens, logits, sum_logprobs)
+            # One host read for loop control; `while`/`if` below reuse it.
+            completed = bool(completed)
 
-            logger.debug(f"Decoding completed: {completed}, sum_logprobs: {sum_logprobs.tolist()}, tokens: ")
-            self.debug_print_tokens(current_tokens)
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"Decoding completed: {completed}, sum_logprobs: {sum_logprobs.tolist()}, tokens: ")
+                self.debug_print_tokens(current_tokens)
 
             # Process accumulated cross-attention weights for alignment
             attn_of_alignment_heads = self._process_cross_attention(accumulated_cross_attns, content_mel_len)
 
-            # for each beam, the most attended frame is:
-            most_attended_frames = torch.argmax(attn_of_alignment_heads[:, -1, :], dim=-1)
-            
+            # for each beam, the most attended frame is. This is the loop's
+            # single intentional device->host transfer; everything below
+            # derives from the Python list.
+            most_attended_frames = torch.argmax(attn_of_alignment_heads[:, -1, :], dim=-1).tolist()
+
             # Calculate absolute timestamps accounting for cumulative offset
             absolute_timestamps = [
-                (frame * 0.02 + self.state.cumulative_time_offset) 
-                for frame in most_attended_frames.tolist()
+                (frame * 0.02 + self.state.cumulative_time_offset)
+                for frame in most_attended_frames
             ]
-            
-            logger.debug(str(most_attended_frames.tolist()) + " most att frames")
-            logger.debug(f"Absolute timestamps: {absolute_timestamps} (offset: {self.state.cumulative_time_offset:.2f}s)")
 
-            most_attended_frame = most_attended_frames[0].item()
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(f"{most_attended_frames} most att frames")
+                logger.debug(f"Absolute timestamps: {absolute_timestamps} (offset: {self.state.cumulative_time_offset:.2f}s)")
+                logger.debug("current tokens" + str(current_tokens.shape))
+
+            most_attended_frame = most_attended_frames[0]
             l_absolute_timestamps.append(absolute_timestamps[0])
-
-            logger.debug("current tokens" + str(current_tokens.shape))
             if completed:
                 # stripping the last token, the eot
                 current_tokens = current_tokens[:, :-1]
@@ -596,13 +625,14 @@ class AlignAtt:
                 break
         
             # debug print
-            for i in range(self.cfg.beam_size):
-                logger.debug("attn: {}, current pos: {}, current token: {}({})".format(
-                    attn_of_alignment_heads.shape if attn_of_alignment_heads is not None else None,
-                    most_attended_frames[i], 
-                    current_tokens[i, -1].item(),
-                    self.tokenizer.decode([current_tokens[i, -1].item()])
-                ))
+            if logger.isEnabledFor(logging.DEBUG):
+                for i in range(self.cfg.beam_size):
+                    logger.debug("attn: {}, current pos: {}, current token: {}({})".format(
+                        attn_of_alignment_heads.shape if attn_of_alignment_heads is not None else None,
+                        most_attended_frames[i],
+                        current_tokens[i, -1].item(),
+                        self.tokenizer.decode([current_tokens[i, -1].item()])
+                    ))
 
         tokens_to_split = current_tokens[0, token_len_before_decoding:]
 

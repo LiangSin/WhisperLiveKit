@@ -265,9 +265,12 @@ class TokenDecoder:
 
 
 class GreedyDecoder(TokenDecoder):
-    def __init__(self, temperature: float, eot: int):
+    def __init__(self, temperature: float, eot: int, need_logprobs: bool = True):
         self.temperature = temperature
         self.eot = eot
+        # The streaming AlignAtt path only reads sum_logprobs from a debug
+        # log; skipping the vocab-wide log_softmax per step saves real work.
+        self.need_logprobs = need_logprobs
 
     def update(
         self, tokens: Tensor, logits: Tensor, sum_logprobs: Tensor
@@ -277,9 +280,10 @@ class GreedyDecoder(TokenDecoder):
         else:
             next_tokens = Categorical(logits=logits / self.temperature).sample()
 
-        logprobs = F.log_softmax(logits.float(), dim=-1)
-        current_logprobs = logprobs[torch.arange(logprobs.shape[0]), next_tokens]
-        sum_logprobs += current_logprobs * (tokens[:, -1] != self.eot)
+        if self.need_logprobs:
+            logprobs = F.log_softmax(logits.float(), dim=-1)
+            current_logprobs = logprobs[torch.arange(logprobs.shape[0]), next_tokens]
+            sum_logprobs += current_logprobs * (tokens[:, -1] != self.eot)
 
         next_tokens[tokens[:, -1] == self.eot] = self.eot
         tokens = torch.cat([tokens, next_tokens[:, None]], dim=-1)
