@@ -313,7 +313,7 @@ class SimulStreamingASR():
                 audio_max_len=self.audio_max_len,
                 audio_min_len=self.audio_min_len,
                 cif_ckpt_path=self.cif_ckpt_path,
-                decoder_type="beam",
+                decoder_type=self.decoder_type,
                 beam_size=self.beams,
                 task=self.direct_english_translation,
                 never_fire=self.never_fire,
