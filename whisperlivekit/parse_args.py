@@ -238,6 +238,27 @@ def parse_args():
     )
 
     simulstreaming_group.add_argument(
+        "--no-batch-decode",
+        action="store_false",
+        default=True,
+        dest="batch_decode",
+        help="Disable cross-session batched decoding (greedy/CUDA only). "
+             "When enabled, concurrent sessions' decode steps are merged "
+             "into one batched forward, cutting kernel launches and weight "
+             "reads on the shared GPU.",
+    )
+
+    simulstreaming_group.add_argument(
+        "--batch-decode-slots",
+        type=int,
+        default=16,
+        dest="batch_decode_slots",
+        help="Max concurrent sessions the batched decoder can hold KV for "
+             "(~0.64 GiB GPU memory per slot on large models). Sessions "
+             "beyond this fall back to unbatched decoding.",
+    )
+
+    simulstreaming_group.add_argument(
         "--custom-alignment-heads",
         type=str,
         default=None,
