@@ -288,8 +288,19 @@ class AlignAtt:
     ):
         """Get logits from decoder, optionally returning cross-attention weights."""
         if self.state.decoder_type == "greedy":
+            executor = getattr(self.model, "batch_executor", None)
+            if executor is not None:
+                # The multi-token round-opening forward runs concurrently in
+                # this thread and requests slot adoption; subsequent
+                # single-token steps are batched across sessions by the
+                # executor worker (which also serves the slot-exhaustion
+                # fallback from this session's dict cache).
+                if tokens.shape[1] > 1:
+                    return executor.prefill(self.state, tokens, audio_features)
+                if self.state.batch_pending or self.state.batch_slot is not None:
+                    return executor.step(self.state, tokens)
             return self.model.decoder(
-                tokens, audio_features, 
+                tokens, audio_features,
                 kv_cache=self.state.kv_cache,
                 return_cross_attn=return_cross_attn
             )

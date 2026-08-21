@@ -363,6 +363,29 @@ class SimulStreamingASR():
         # so concurrent connections can safely share these weights.
         self.shared_model = self.load_model()
 
+        # Cross-session batched decode: greedy-only (the beam path drives
+        # its own inference object), CUDA-only (the slot buffers and the
+        # launch-overhead motivation are GPU-specific).
+        if (getattr(self, "batch_decode", True)
+                and self.decoder_type == "greedy"
+                and self.shared_model.device.type == "cuda"):
+            from .batch_executor import BatchDecodeExecutor
+            executor = BatchDecodeExecutor(
+                self.shared_model,
+                max_slots=max(2, int(getattr(self, "batch_decode_slots", 16) or 16)),
+            )
+            if executor._graph is not None:
+                self.shared_model.batch_executor = executor
+            else:
+                # Without the CUDA graph, the executor's fixed-shape step is
+                # measurably slower per call than the original per-session
+                # path whenever batches do not form — better to not batch at
+                # all. (The eager step stays only as a unit-test surface.)
+                logger.warning(
+                    "batched decode disabled: CUDA graph unavailable — "
+                    "using the original per-session decode path")
+                executor._shutdown()
+
 
     def _resolve_encoder_backend(self, preferred_backend, compatible_whisper_mlx, compatible_faster_whisper):
         choice = preferred_backend or "auto"

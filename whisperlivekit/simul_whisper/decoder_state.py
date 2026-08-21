@@ -50,10 +50,23 @@ class DecoderState:
     decoder_type: str = "greedy"
     
     inference: Any = None
-    
+
+    # Cross-session batched decode (batch_executor.py): slot index held for
+    # the current round (assigned asynchronously by the executor worker),
+    # and whether an adoption/round is pending with the executor.
+    batch_slot: Optional[int] = None
+    batch_pending: bool = False
+    batch_executor: Any = None
+
     def clean_cache(self):
         """Clean the kv_cache after each inference step."""
         self.kv_cache = {}
+        if self.batch_executor is not None and (
+                self.batch_pending or self.batch_slot is not None):
+            self.batch_pending = False
+            # The worker clears batch_slot; FIFO ordering runs any queued
+            # adoption for this round first, so the slot cannot leak.
+            self.batch_executor.cancel(self)
         if self.decoder_type == "beam" and self.inference is not None:
             self.inference.kv_cache = self.kv_cache
             if self.token_decoder is not None:
@@ -83,6 +96,6 @@ class DecoderState:
         self.reset(rewind_threshold)
         self.segments = []
         self.tokens = []
-        self.kv_cache = {}
+        self.clean_cache()
         self.first_timestamp = None
 
